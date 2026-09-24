@@ -106,7 +106,7 @@ object SoteriaExamples {
     val encryptedDataset = EncryptedDataset(classificationDF.as[ClassificationData], session.masterKey)
     
     // Train SOTERIA Logistic Regression model
-    val logisticRegression = new SoteriaLogisticRegression(session, maxIterations = 50, stepSize = 0.1)
+    val logisticRegression = new SoteriaLogisticRegression(session, maxIterations = 100, stepSize = 1.0)
     val model = logisticRegression.train(encryptedDataset)
     
     println(s"[SOTERIA] Trained Logistic Regression model")
@@ -267,7 +267,6 @@ object SoteriaExamples {
     
     println(s"[SOTERIA] Trained PCA model")
     println(s"[SOTERIA] Reduced dimensionality from 10 to 3")
-    println(s"[SOTERIA] Principal components computed within SGX enclave")
   }
   
   /**
@@ -295,52 +294,28 @@ object SoteriaExamples {
     println(s"[SOTERIA] Trained LDA model")
     println(s"[SOTERIA] Number of topics: ${model.getK}")
     println(s"[SOTERIA] Vocabulary size: ${model.vocabSize}")
-    println(s"[SOTERIA] Topic modeling completed within SGX enclave")
   }
   
   /**
-   * Security demonstration - SOTERIA v1.0 basic features
+   * Shows how operations are classified into computation zones.
    */
   def securityDemo(session: SoteriaSession): Unit = {
-    println("\n--- SOTERIA v1.0 Security Features Demo ---")
+    println("\n--- SOTERIA Computation Partitioning ---")
     
-    // Demonstrate computation partitioning (core SOTERIA v1.0 feature)
-    val sensitiveOps = List("gradient_computation", "model_update", "feature_extraction")
-    val nonSensitiveOps = List("data_loading", "result_aggregation", "visualization")
+    val operations = List(
+      "gradient_computation", "model_update", "feature_extraction",
+      "data_loading", "result_aggregation", "visualization"
+    )
     
-    println("[SOTERIA] Computation partitioning decisions (core v1.0 feature):")
-    (sensitiveOps ++ nonSensitiveOps).foreach { op =>
-      val zone = ComputationPartitioner.getComputationZone(op)
-      val location = zone match {
-        case ComputationPartitioner.EnclaveZone => "SGX Enclave (Secure)"
-        case ComputationPartitioner.UntrustedZone => "Untrusted Environment"
+    operations.foreach { op =>
+      val location = ComputationPartitioner.getComputationZone(op) match {
+        case ComputationPartitioner.EnclaveZone => "enclave"
+        case ComputationPartitioner.UntrustedZone => "untrusted"
       }
       println(s"  $op -> $location")
     }
     
-    println("\n[SOTERIA v1.0] Core security features implemented:")
-    println("  ✓ SGX Enclave-based computation")
-    println("  ✓ Computation partitioning between secure/untrusted zones")
-    println("  ✓ AES-GCM encryption for data protection")
-    println("  ✓ Secure data shuffling within enclaves")
-    
-    /* 
-     * FUTURE WORK: Advanced attack detection (not in SOTERIA v1.0)
-     * The following features are planned for future versions:
-     */
-    /*
-    // Advanced attack detection - will be implemented in future versions
-    val normalAccessPattern = Seq("model_training", "prediction", "evaluation")
-    val suspiciousAccessPattern = Seq("repeated_model_query", "systematic_inference", "gradient_extraction")
-    
-    println(s"[SOTERIA v2+] Normal access pattern detection: ${SecurityUtils.detectAnomalousAccess(normalAccessPattern)}")
-    println(s"[SOTERIA v2+] Suspicious access pattern detection: ${SecurityUtils.detectAnomalousAccess(suspiciousAccessPattern)}")
-    */
-    
-    println("\n[SOTERIA v1.0] Advanced security features planned for future versions:")
-    println("  - Model inversion attack detection")
-    println("  - Membership inference attack detection")
-    println("  - Model extraction attack detection")
-    println("  - Advanced access pattern analysis")
+    println("\n[SOTERIA] Rebuild status: zones are classified but not yet enforced,")
+    println("  and datasets are read as plaintext. See the v2.0 plan in the README.")
   }
 }

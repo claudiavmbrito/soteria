@@ -12,12 +12,13 @@ import org.apache.spark.ml.regression.{LinearRegression, DecisionTreeRegressor}
 import org.apache.spark.ml.evaluation.{MulticlassClassificationEvaluator, RegressionEvaluator}
 import org.apache.spark.sql.types._
 import org.apache.spark.rdd.RDD
+import scala.reflect.ClassTag
 import scala.util.Random
 
 /**
  * SOTERIA Machine Learning Implementation
  * Based on the IEEE paper "Privacy-Preserving Machine Learning on Apache Spark"
- * Implements SGX-based secure ML algorithms with computation partitioning
+ * ML algorithms expressed through SoteriaSession.executeWithPartitioning.
  */
 object SoteriaML {
   
@@ -31,89 +32,64 @@ object SoteriaML {
   case class PCAData(features: Vector, id: Long)
   
   /**
-   * SOTERIA K-Means Clustering with SGX Enclaves
+   * SOTERIA K-Means Clustering
    */
-  class SoteriaKMeans(session: SoteriaSession, k: Int, maxIterations: Int = 100) {
+  class SoteriaKMeans(session: SoteriaSession, k: Int, maxIterations: Int = 100, seed: Long = 42L) {
     
     def train(dataset: EncryptedDataset[ClusteringData]): SoteriaKMeansModel = {
-      // Phase 1: Data preprocessing in SGX enclave
-      val preprocessedData = session.executeWithPartitioning(
+      // Phase 1: data preprocessing and initial centroid selection (sensitive)
+      val (dataRDD, initialCentroids) = session.executeWithPartitioning(
         dataset,
         "data_preprocessing",
         (data: Dataset[ClusteringData]) => {
-          println("[SOTERIA-SGX] Preprocessing clustering data within enclave...")
-          
-          // Convert to RDD for processing
-          import session.spark.implicits._
-          val dataRDD = data.rdd.map(row => (row.id, row.features))
-          
-          // Initial centroid selection within enclave (secure)
-          val initialCentroids = selectInitialCentroids(dataRDD, k)
-          
-          (dataRDD, initialCentroids)
+          val dataRDD = data.rdd.map(row => (row.id, row.features)).cache()
+          (dataRDD, SoteriaKMeans.selectInitialCentroids(dataRDD, k, seed))
         }
       )
       
-      val (dataRDD, initialCentroids) = preprocessedData
-      
-      // Phase 2: Iterative clustering with computation partitioning
-      val finalCentroids = performIterativeClustering(
-        session, dataRDD, initialCentroids, maxIterations
-      )
+      // Phase 2: iterative clustering with computation partitioning
+      val finalCentroids = performIterativeClustering(dataset, dataRDD, initialCentroids)
+      dataRDD.unpersist()
       
       SoteriaKMeansModel(finalCentroids, k)
     }
     
-    private def selectInitialCentroids(dataRDD: RDD[(Long, Vector)], k: Int): Array[Vector] = {
-      // K-means++ initialization within SGX enclave
-      val sample = dataRDD.takeSample(false, k, Random.nextLong())
-      sample.map(_._2)
-    }
-    
     private def performIterativeClustering(
-      session: SoteriaSession,
+      dataset: EncryptedDataset[ClusteringData],
       dataRDD: RDD[(Long, Vector)],
-      initialCentroids: Array[Vector],
-      maxIter: Int
+      initialCentroids: Array[Vector]
     ): Array[Vector] = {
       
       var centroids = initialCentroids
       var iteration = 0
       var converged = false
       
-      while (iteration < maxIter && !converged) {
-        // Distance computation in untrusted environment (non-sensitive)
-        val assignments = dataRDD.map { case (id, point) =>
-          val closestCentroid = findClosestCentroid(point, centroids)
-          (closestCentroid, (point, 1))
+      while (iteration < maxIterations && !converged) {
+        val current = centroids
+        // Point-to-centroid assignment
+        val assignments = dataRDD.map { case (_, point) =>
+          (SoteriaKMeans.findClosestCentroid(point, current), (point.toArray, 1L))
         }
         
-        // Centroid update in SGX enclave (sensitive operation)
+        // Centroid update (sensitive operation)
         val newCentroids = session.executeWithPartitioning(
-          session.loadEncryptedDataset("dummy"), // Placeholder
+          dataset,
           "model_update",
-          _ => {
-            println(s"[SOTERIA-SGX] Updating centroids in SGX enclave (iteration ${iteration + 1})...")
-            
+          (_: Dataset[ClusteringData]) => {
             val centroidUpdates = assignments.reduceByKey { case ((sum1, count1), (sum2, count2)) =>
-              val newSum = Vectors.dense(
-                sum1.toArray.zip(sum2.toArray).map { case (a, b) => a + b }
-              )
-              (newSum, count1 + count2)
+              (sum1.zip(sum2).map { case (a, b) => a + b }, count1 + count2)
             }.collectAsMap()
             
-            centroids.indices.map { i =>
+            current.indices.map { i =>
               centroidUpdates.get(i) match {
-                case Some((sum, count)) => 
-                  Vectors.dense(sum.toArray.map(_ / count))
-                case None => centroids(i)
+                case Some((sum, count)) => Vectors.dense(sum.map(_ / count))
+                case None => current(i)
               }
             }.toArray
           }
         )
         
-        // Check convergence
-        val maxDelta = centroids.zip(newCentroids).map { case (old, newC) =>
+        val maxDelta = current.zip(newCentroids).map { case (old, newC) =>
           Vectors.sqdist(old, newC)
         }.max
         
@@ -124,270 +100,207 @@ object SoteriaML {
       
       centroids
     }
+  }
+  
+  object SoteriaKMeans {
+    private val InitSampleSize = 10000
     
-    private def findClosestCentroid(point: Vector, centroids: Array[Vector]): Int = {
-      centroids.zipWithIndex.minBy { case (centroid, _) =>
-        Vectors.sqdist(point, centroid)
-      }._2
+    /** k-means++ seeding over a bounded random sample of the data. */
+    private[ml] def selectInitialCentroids(dataRDD: RDD[(Long, Vector)], k: Int, seed: Long): Array[Vector] = {
+      val sample = dataRDD.takeSample(withReplacement = false, InitSampleSize, seed).map(_._2)
+      require(sample.length >= k, s"need at least $k points, got ${sample.length}")
+      val rnd = new Random(seed)
+      val centroids = scala.collection.mutable.ArrayBuffer(sample(rnd.nextInt(sample.length)))
+      val dist = sample.map(p => Vectors.sqdist(p, centroids.head))
+      while (centroids.length < k) {
+        // Pick the next centroid with probability proportional to squared distance.
+        var target = rnd.nextDouble() * dist.sum
+        var idx = 0
+        while (idx < dist.length - 1 && target >= dist(idx)) { target -= dist(idx); idx += 1 }
+        val next = sample(idx)
+        centroids += next
+        for (i <- sample.indices) dist(i) = math.min(dist(i), Vectors.sqdist(sample(i), next))
+      }
+      centroids.toArray
+    }
+    
+    private[ml] def findClosestCentroid(point: Vector, centroids: Array[Vector]): Int = {
+      centroids.indices.minBy(i => Vectors.sqdist(point, centroids(i)))
     }
   }
   
   case class SoteriaKMeansModel(centroids: Array[Vector], k: Int) {
-    def predict(point: Vector): Int = {
-      centroids.zipWithIndex.minBy { case (centroid, _) =>
-        Vectors.sqdist(point, centroid)
-      }._2
-    }
+    def predict(point: Vector): Int = SoteriaKMeans.findClosestCentroid(point, centroids)
   }
   
   /**
-   * SOTERIA Logistic Regression with SGX Protection
+   * SOTERIA Logistic Regression (full-batch gradient descent)
    */
   class SoteriaLogisticRegression(session: SoteriaSession, maxIterations: Int = 100, stepSize: Double = 0.01) {
     
     def train(dataset: EncryptedDataset[ClassificationData]): SoteriaLogisticRegressionModel = {
-      // Gradient computation and model updates happen in SGX enclave
-      val result = session.executeWithPartitioning(
+      val (weights, intercept) = session.executeWithPartitioning(
         dataset,
         "gradient_computation",
         (data: Dataset[ClassificationData]) => {
-          println("[SOTERIA-SGX] Training logistic regression within SGX enclave...")
+          val trainingRDD = data.rdd.cache()
+          val numExamples = trainingRDD.count().toDouble
+          require(numExamples > 0, "empty training set")
           
-          import session.spark.implicits._
-          val trainingRDD = data.rdd
-          
-          // Initialize weights within enclave
           val numFeatures = trainingRDD.first().features.size
-          var weights = Vectors.zeros(numFeatures)
+          var weights = Array.fill(numFeatures)(0.0)
           var intercept = 0.0
           
-          // SGD training loop within enclave
-          for (iteration <- 1 to maxIterations) {
-            val gradient = computeGradient(trainingRDD, weights, intercept)
-            
-            // Update parameters
-            weights = Vectors.dense(
-              weights.toArray.zip(gradient._1.toArray).map { case (w, g) =>
-                w - stepSize * g
-              }
-            )
-            intercept = intercept - stepSize * gradient._2
-            
-            if (iteration % 10 == 0) {
-              val loss = computeLogisticLoss(trainingRDD, weights, intercept)
-              println(s"[SOTERIA-SGX] Iteration $iteration, Loss: $loss")
-            }
+          for (_ <- 1 to maxIterations) {
+            val (gradSum, errSum) = SoteriaLogisticRegression.computeGradient(trainingRDD, weights, intercept)
+            weights = weights.zip(gradSum).map { case (w, g) => w - stepSize * g / numExamples }
+            intercept -= stepSize * errSum / numExamples
           }
           
-          (weights, intercept)
+          trainingRDD.unpersist()
+          (Vectors.dense(weights), intercept)
         }
       )
       
-      SoteriaLogisticRegressionModel(result._1, result._2)
+      SoteriaLogisticRegressionModel(weights, intercept)
+    }
+  }
+  
+  object SoteriaLogisticRegression {
+    private[ml] def sigmoid(x: Double): Double = 1.0 / (1.0 + math.exp(-x))
+    
+    private[ml] def margin(weights: Array[Double], features: Vector, intercept: Double): Double = {
+      val f = features.toArray
+      var s = intercept
+      var i = 0
+      while (i < weights.length) { s += weights(i) * f(i); i += 1 }
+      s
     }
     
-    private def computeGradient(
-      data: RDD[ClassificationData], 
-      weights: Vector, 
+    /** Sum over the data of the gradient w.r.t. weights and intercept. */
+    private[ml] def computeGradient(
+      data: RDD[ClassificationData],
+      weights: Array[Double],
       intercept: Double
-    ): (Vector, Double) = {
-      val gradients = data.map { point =>
-        val prediction = sigmoid(weights.toArray.zip(point.features.toArray).map { 
-          case (w, f) => w * f 
-        }.sum + intercept)
-        
-        val error = prediction - point.label
-        val gradient = point.features.toArray.map(_ * error)
-        
-        (Vectors.dense(gradient), error)
-      }.reduce { case ((g1, e1), (g2, e2)) =>
-        val combinedGradient = g1.toArray.zip(g2.toArray).map { case (a, b) => a + b }
-        (Vectors.dense(combinedGradient), e1 + e2)
-      }
-      
-      gradients
+    ): (Array[Double], Double) = {
+      data.treeAggregate((Array.fill(weights.length)(0.0), 0.0))(
+        seqOp = { case ((grad, errSum), point) =>
+          val error = sigmoid(margin(weights, point.features, intercept)) - point.label
+          val f = point.features.toArray
+          var i = 0
+          while (i < grad.length) { grad(i) += f(i) * error; i += 1 }
+          (grad, errSum + error)
+        },
+        combOp = { case ((g1, e1), (g2, e2)) =>
+          var i = 0
+          while (i < g1.length) { g1(i) += g2(i); i += 1 }
+          (g1, e1 + e2)
+        }
+      )
     }
-    
-    private def computeLogisticLoss(
-      data: RDD[ClassificationData], 
-      weights: Vector, 
-      intercept: Double
-    ): Double = {
-      data.map { point =>
-        val prediction = sigmoid(weights.toArray.zip(point.features.toArray).map { 
-          case (w, f) => w * f 
-        }.sum + intercept)
-        
-        -point.label * math.log(prediction) - (1 - point.label) * math.log(1 - prediction)
-      }.mean()
-    }
-    
-    private def sigmoid(x: Double): Double = 1.0 / (1.0 + math.exp(-x))
   }
   
   case class SoteriaLogisticRegressionModel(weights: Vector, intercept: Double) {
-    def predict(features: Vector): Double = {
-      val score = weights.toArray.zip(features.toArray).map { 
-        case (w, f) => w * f 
-      }.sum + intercept
-      
-      if (1.0 / (1.0 + math.exp(-score)) >= 0.5) 1.0 else 0.0
-    }
+    def probability(features: Vector): Double =
+      SoteriaLogisticRegression.sigmoid(SoteriaLogisticRegression.margin(weights.toArray, features, intercept))
+    
+    def predict(features: Vector): Double = if (probability(features) >= 0.5) 1.0 else 0.0
   }
   
   /**
-   * SOTERIA Collaborative Filtering (ALS) with SGX Protection
+   * SOTERIA Collaborative Filtering (ALS, explicit feedback)
    */
   class SoteriaALS(session: SoteriaSession, rank: Int = 10, maxIterations: Int = 20, regParam: Double = 0.01) {
     
     def train(dataset: EncryptedDataset[RecommendationData]): SoteriaALSModel = {
-      // Matrix factorization computations happen in SGX enclave
-      val result = session.executeWithPartitioning(
+      val (userFactors, itemFactors) = session.executeWithPartitioning(
         dataset,
         "model_update",
         (data: Dataset[RecommendationData]) => {
-          println("[SOTERIA-SGX] Training ALS model within SGX enclave...")
+          val ratingsRDD = data.rdd.cache()
+          val rnd = new Random(42L)
           
-          import session.spark.implicits._
-          val ratingsRDD = data.rdd
-          
-          // Initialize user and item factors within enclave
           val users = ratingsRDD.map(_.user).distinct().collect()
           val items = ratingsRDD.map(_.item).distinct().collect()
           
-          var userFactors = users.map { user =>
-            (user, Array.fill(rank)(Random.nextGaussian() * 0.1))
-          }.toMap
+          var userFactors = users.map(u => (u, Array.fill(rank)(rnd.nextGaussian() * 0.1))).toMap
+          var itemFactors = items.map(i => (i, Array.fill(rank)(rnd.nextGaussian() * 0.1))).toMap
           
-          var itemFactors = items.map { item =>
-            (item, Array.fill(rank)(Random.nextGaussian() * 0.1))
-          }.toMap
-          
-          // Alternating Least Squares within enclave
-          for (iteration <- 1 to maxIterations) {
-            // Update user factors
-            userFactors = updateUserFactors(ratingsRDD, userFactors, itemFactors, regParam)
-            
-            // Update item factors  
-            itemFactors = updateItemFactors(ratingsRDD, userFactors, itemFactors, regParam)
-            
-            if (iteration % 5 == 0) {
-              val rmse = computeRMSE(ratingsRDD, userFactors, itemFactors)
-              println(s"[SOTERIA-SGX] Iteration $iteration, RMSE: $rmse")
-            }
+          for (_ <- 1 to maxIterations) {
+            userFactors = SoteriaALS.solveFactors(ratingsRDD.map(r => (r.user, r.item, r.rating)), itemFactors, rank, regParam)
+            itemFactors = SoteriaALS.solveFactors(ratingsRDD.map(r => (r.item, r.user, r.rating)), userFactors, rank, regParam)
           }
           
+          ratingsRDD.unpersist()
           (userFactors, itemFactors)
         }
       )
       
-      SoteriaALSModel(result._1, result._2, rank)
+      SoteriaALSModel(userFactors, itemFactors, rank)
     }
-    
-    private def updateUserFactors(
-      ratings: RDD[RecommendationData],
-      userFactors: Map[Int, Array[Double]],
-      itemFactors: Map[Int, Array[Double]], 
+  }
+  
+  object SoteriaALS {
+    /**
+     * For each `id`, solve (sum_j f_j f_j^T + lambda * n * I) x = sum_j r_j f_j
+     * over its ratings `(id, otherId, rating)`, holding `otherFactors` fixed.
+     */
+    private[ml] def solveFactors(
+      ratings: RDD[(Int, Int, Float)],
+      otherFactors: Map[Int, Array[Double]],
+      rank: Int,
       regParam: Double
     ): Map[Int, Array[Double]] = {
-      
-      ratings.groupBy(_.user).map { case (user, userRatings) =>
-        val A = Array.ofDim[Double](rank, rank)
-        val b = Array.fill(rank)(0.0)
-        
-        userRatings.foreach { rating =>
-          val itemFactor = itemFactors(rating.item)
-          
-          // Update normal equations
-          for (i <- itemFactor.indices; j <- itemFactor.indices) {
-            A(i)(j) += itemFactor(i) * itemFactor(j)
+      val bFactors = ratings.sparkContext.broadcast(otherFactors)
+      val result = ratings.map { case (id, other, rating) => (id, (other, rating)) }
+        .groupByKey()
+        .map { case (id, rs) =>
+          val A = Array.ofDim[Double](rank, rank)
+          val b = Array.fill(rank)(0.0)
+          var n = 0
+          rs.foreach { case (other, rating) =>
+            val f = bFactors.value(other)
+            for (i <- 0 until rank; j <- 0 until rank) A(i)(j) += f(i) * f(j)
+            for (i <- 0 until rank) b(i) += rating * f(i)
+            n += 1
           }
-          
-          for (i <- itemFactor.indices) {
-            A(i)(i) += regParam
-            b(i) += rating.rating * itemFactor(i)
-          }
+          for (i <- 0 until rank) A(i)(i) += regParam * n
+          (id, solveLinearSystem(A, b))
         }
-        
-        // Solve normal equations (simplified)
-        val newFactor = solveLinearSystem(A, b)
-        (user, newFactor)
-      }.collect().toMap
+        .collect()
+        .toMap
+      bFactors.destroy()
+      result
     }
     
-    private def updateItemFactors(
-      ratings: RDD[RecommendationData],
-      userFactors: Map[Int, Array[Double]],
-      itemFactors: Map[Int, Array[Double]],
-      regParam: Double
-    ): Map[Int, Array[Double]] = {
-      
-      ratings.groupBy(_.item).map { case (item, itemRatings) =>
-        val A = Array.ofDim[Double](rank, rank)
-        val b = Array.fill(rank)(0.0)
-        
-        itemRatings.foreach { rating =>
-          val userFactor = userFactors(rating.user)
-          
-          for (i <- userFactor.indices; j <- userFactor.indices) {
-            A(i)(j) += userFactor(i) * userFactor(j)
-          }
-          
-          for (i <- userFactor.indices) {
-            A(i)(i) += regParam
-            b(i) += rating.rating * userFactor(i)
-          }
-        }
-        
-        val newFactor = solveLinearSystem(A, b)
-        (item, newFactor)
-      }.collect().toMap
-    }
-    
-    private def solveLinearSystem(A: Array[Array[Double]], b: Array[Double]): Array[Double] = {
-      // Simplified Gaussian elimination (in practice, use more robust solver)
+    /** Gaussian elimination with partial pivoting. Mutates `A` and `b`. */
+    private[soteria] def solveLinearSystem(A: Array[Array[Double]], b: Array[Double]): Array[Double] = {
       val n = b.length
+      for (col <- 0 until n) {
+        val pivotRow = (col until n).maxBy(r => math.abs(A(r)(col)))
+        if (pivotRow != col) {
+          val tmpRow = A(col); A(col) = A(pivotRow); A(pivotRow) = tmpRow
+          val tmpB = b(col); b(col) = b(pivotRow); b(pivotRow) = tmpB
+        }
+        val pivot = A(col)(col)
+        require(math.abs(pivot) > 1e-12, "singular system")
+        for (r <- col + 1 until n) {
+          val factor = A(r)(col) / pivot
+          for (c <- col until n) A(r)(c) -= factor * A(col)(c)
+          b(r) -= factor * b(col)
+        }
+      }
       val x = Array.fill(n)(0.0)
-      
-      // Forward elimination
-      for (i <- 0 until n) {
-        val pivot = A(i)(i)
-        if (math.abs(pivot) > 1e-10) {
-          for (j <- i + 1 until n) {
-            val factor = A(j)(i) / pivot
-            for (k <- i until n) {
-              A(j)(k) -= factor * A(i)(k)
-            }
-            b(j) -= factor * b(i)
-          }
-        }
-      }
-      
-      // Back substitution
       for (i <- (n - 1) to 0 by -1) {
-        x(i) = b(i)
-        for (j <- i + 1 until n) {
-          x(i) -= A(i)(j) * x(j)
-        }
-        x(i) /= A(i)(i)
+        var s = b(i)
+        for (j <- i + 1 until n) s -= A(i)(j) * x(j)
+        x(i) = s / A(i)(i)
       }
-      
       x
     }
     
-    private def computeRMSE(
-      ratings: RDD[RecommendationData],
-      userFactors: Map[Int, Array[Double]],
-      itemFactors: Map[Int, Array[Double]]
-    ): Double = {
-      val predictions = ratings.map { rating =>
-        val prediction = userFactors(rating.user).zip(itemFactors(rating.item))
-          .map { case (u, i) => u * i }.sum
-        
-        math.pow(rating.rating - prediction, 2)
-      }
-      
-      math.sqrt(predictions.mean())
+    def computeRMSE(ratings: RDD[RecommendationData], model: SoteriaALSModel): Double = {
+      math.sqrt(ratings.map(r => math.pow(r.rating - model.predict(r.user, r.item), 2)).mean())
     }
   }
   
@@ -411,14 +324,13 @@ object SoteriaML {
   object SecurityUtils {
     
     /**
-     * Secure data shuffling within SGX enclave
+     * Per-partition Fisher-Yates shuffle (records never leave their partition).
      */
-    def secureDataShuffle[T](data: RDD[T], seed: Long = System.currentTimeMillis()): RDD[T] = {
+    def secureDataShuffle[T: ClassTag](data: RDD[T], seed: Long = System.currentTimeMillis()): RDD[T] = {
       data.mapPartitionsWithIndex { (index, iterator) =>
         val random = new Random(seed + index)
         val shuffled = iterator.toArray
         
-        // Fisher-Yates shuffle within enclave
         for (i <- shuffled.length - 1 to 1 by -1) {
           val j = random.nextInt(i + 1)
           val temp = shuffled(i)
