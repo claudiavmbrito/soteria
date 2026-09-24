@@ -118,7 +118,7 @@ In **SML-1**, all profiles map to enclave executors. The mode is a single config
 - Add a `SoteriaSuite` with local-mode Spark tests.
 - Add a GitHub Actions workflow running `sbt test`.
 
-**Phase 1: Real encrypted I/O**
+**Phase 1: Real encrypted I/O**: done
 - Add `soteria.crypto` (KmsClient, encrypt CLI).
 - Tests:
   - An encrypt→read round-trip.
@@ -170,3 +170,18 @@ In **SML-1**, all profiles map to enclave executors. The mode is a single config
 
 ## Workflow
 Develop on `soteria-v2`, with one commit per phase or sub-step, and push after each phase passes its checks.
+
+## Phase 1 notes
+
+- Added `soteria.crypto`:
+  - `SoteriaKeyStore` resolves keys from the environment, a file, or in-process registration. It never uses the Spark/Hadoop conf.
+  - `SoteriaKmsClient` wraps Parquet data keys with AES-GCM, using the key id as AAD.
+  - `ParquetEncryption` sets a uniform key, `AES_GCM_V1` and an encrypted footer.
+  - `EncryptDataset` is the CLI.
+- `SoteriaSession` now has:
+  - `SoteriaConfig.keyId` and `requireProvisionedKey`
+  - `saveEncrypted`
+  - an ephemeral dev key with a warning when no key is provisioned
+- Integrity finding: Parquet authenticates each module only when it is read. Flipping a byte in a module that a query never reads (e.g. page indexes on a full scan) doesn't fail that query, and it also can't change the query's result. The test asserts the real property across ~40 positions: tampering either fails the read or leaves the result unchanged.
+- Caveat for phase 2/3: the Hadoop conf only names the KMS client class; keys stay in the key store. In SML-2 the untrusted executors will have no key, so they cannot read any dataset. This is the intended split.
+

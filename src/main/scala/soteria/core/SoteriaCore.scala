@@ -1,8 +1,8 @@
 package soteria.core
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.Dataset
+import org.apache.spark.sql.{Dataset, SaveMode, SparkSession}
+import soteria.crypto.{ParquetEncryption, SoteriaKeyStore}
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -14,11 +14,10 @@ import scala.util.Try
  * SOTERIA Core Implementation
  * Based on the IEEE paper "Privacy-Preserving Machine Learning on Apache Spark"
  *
- * Status (v2.0 rebuild, phase 0): the computation zones below are only
- * classified and logged. Nothing is isolated in an SGX enclave yet and
- * datasets are read as plaintext. Enclave scheduling (Gramine + stage-level
- * scheduling) and encrypted storage (Parquet modular encryption) are added in
- * later phases.
+ * Status (v2.0 rebuild, phase 1): datasets are stored as encrypted Parquet
+ * (AES-GCM, see [[soteria.crypto]]). The computation zones below are only
+ * classified and logged: nothing is isolated in an SGX enclave yet. Enclave
+ * scheduling (Gramine + stage-level scheduling) is added in later phases.
  */
 object SoteriaCore extends Logging {
   
@@ -33,12 +32,15 @@ object SoteriaCore extends Logging {
     encryptionEnabled: Boolean = true,
     partitioningStrategy: String = "COMPUTATION_PARTITIONING", // or "BASELINE"
     keySize: Int = 128,
-    batchSize: Int = 1000
+    batchSize: Int = 1000,
+    // Master key used for dataset encryption, resolved through SoteriaKeyStore.
+    keyId: String = "soteria-master",
+    // If false and no key is provisioned, an ephemeral key is generated (local development only).
+    requireProvisionedKey: Boolean = false
   )
   
   /**
-   * Dataset handle bound to the session key it will be decrypted with.
-   * The data itself is not encrypted yet (see phase 1 of the rebuild).
+   * Dataset read from encrypted storage, with the master key that protects it.
    */
   case class EncryptedDataset[T](
     data: Dataset[T],
@@ -119,13 +121,33 @@ object SoteriaCore extends Logging {
    */
   class SoteriaSession(val spark: SparkSession, val config: SoteriaConfig = SoteriaConfig()) {
     
-    val masterKey = EncryptionUtils.generateKey(config.keySize)
+    val masterKey: SecretKey = resolveMasterKey()
+    
+    if (config.encryptionEnabled) ParquetEncryption.configure(spark.sparkContext.hadoopConfiguration)
+    
+    private def resolveMasterKey(): SecretKey = SoteriaKeyStore.get(config.keyId).getOrElse {
+      require(!config.requireProvisionedKey,
+        s"master key '${config.keyId}' was not provisioned (set ${SoteriaKeyStore.EnvKeys} or ${SoteriaKeyStore.EnvKeysFile})")
+      logWarning(s"No master key '${config.keyId}' provisioned; using an ephemeral key. " +
+        "Data encrypted in this session cannot be read by later sessions.")
+      val key = EncryptionUtils.generateKey(config.keySize)
+      SoteriaKeyStore.register(config.keyId, key)
+      key
+    }
     
     /**
-     * Load a Parquet dataset. Currently plaintext: encrypted Parquet is phase 1.
+     * Read an encrypted Parquet dataset. Every page and the footer are
+     * authenticated with AES-GCM, so a tampered file fails to load.
      */
     def loadEncryptedDataset[T](path: String)(implicit encoder: org.apache.spark.sql.Encoder[T]): EncryptedDataset[T] = {
       EncryptedDataset(spark.read.parquet(path).as[T], masterKey)
+    }
+    
+    /** Write `data` as Parquet with all columns and the footer encrypted under the session master key. */
+    def saveEncrypted(data: Dataset[_], path: String, mode: SaveMode = SaveMode.ErrorIfExists): Unit = {
+      val writer = data.write.mode(mode)
+      val options = if (config.encryptionEnabled) ParquetEncryption.writeOptions(config.keyId) else Map.empty[String, String]
+      writer.options(options).parquet(path)
     }
     
     /**
