@@ -169,7 +169,7 @@ In **SML-1**, all profiles map to enclave executors. The mode is a single config
 - **Phase 4:** the bench scripts produce CSVs and plots for vanilla / SML-1 / SML-2. Compare the trends with the paper's figures.
 
 ## Workflow
-Develop on `claude/charming-knuth-392bk8`, with one commit per phase or sub-step, and push after each phase passes its checks.
+Develop on `soteria-v2`, with one commit per phase or sub-step, and push after each phase passes its checks.
 
 ## Phase 1 notes
 
