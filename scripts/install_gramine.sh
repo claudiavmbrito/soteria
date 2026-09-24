@@ -16,8 +16,24 @@ SUDO=""; [[ $EUID -ne 0 ]] && SUDO="sudo"
 case "$ID" in
   rocky|rhel|almalinux|centos)
     echo "note: Gramine support for EL${VERSION_ID%%.*} is experimental"
+    # Gramine's Python tools need python3-voluptuous, python3-tomli-w and
+    # python3-click, which come from EPEL; EPEL in turn needs CRB enabled.
+    if [[ "$ID" == "rhel" ]]; then
+      $SUDO dnf install -y dnf-plugins-core \
+        "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${VERSION_ID%%.*}.noarch.rpm"
+      $SUDO subscription-manager repos --enable "codeready-builder-for-rhel-${VERSION_ID%%.*}-$(uname -m)-rpms" \
+        || echo "warning: could not enable CodeReady Builder; enable it before installing Gramine" >&2
+    else
+      $SUDO dnf install -y epel-release dnf-plugins-core
+      $SUDO dnf config-manager --set-enabled crb \
+        || echo "warning: could not enable the CRB repository (dnf config-manager --set-enabled crb)" >&2
+    fi
     $SUDO curl -fsSLo /etc/yum.repos.d/gramine.repo https://packages.gramineproject.io/rpm/gramine.repo
-    $SUDO dnf install -y gramine
+    if ! $SUDO dnf install -y gramine; then
+      echo "Gramine's EL${VERSION_ID%%.*} package could not be installed (see the dnf error above)." >&2
+      echo "Fallback: build Gramine from source: https://gramine.readthedocs.io/en/stable/devel/building.html" >&2
+      exit 1
+    fi
     ;;
   ubuntu|debian)
     $SUDO curl -fsSLo /usr/share/keyrings/gramine-keyring.gpg \
