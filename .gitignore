@@ -6,6 +6,11 @@ project/project/
 .metals/
 .bloop/
 *.class
-!graphene-sgx-spark/java_tests/*.class
+!legacy/graphene-sgx-spark/java_tests/*.class
 spark-warehouse/
 metastore_db/
+gramine/dist/
+gramine/work/
+gramine/*.manifest
+gramine/*.manifest.sgx
+gramine/*.sig

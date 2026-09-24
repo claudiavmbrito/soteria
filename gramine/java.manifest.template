@@ -1,0 +1,76 @@
+# Gramine manifest for the SOTERIA Spark JVM (driver and enclave workers).
+# Rendered by the Makefile with gramine-manifest; see README.md.
+#
+# Bring-up settings marked INSECURE must be replaced before real use:
+# - loader.insecure__use_cmdline_argv: the host chooses the JVM arguments.
+# - SOTERIA_MASTER_KEYS passthrough: the host hands the key to the enclave;
+#   the target design provisions it with RA-TLS after DCAP attestation.
+
+libos.entrypoint = "{{ java_home }}/bin/java"
+loader.entrypoint.uri = "file:{{ gramine.libos }}"
+loader.log_level = "{{ log_level }}"
+
+# INSECURE (bring-up only)
+loader.insecure__use_cmdline_argv = true
+
+loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr{{ arch_libdir }}:{{ java_home }}/lib:{{ java_home }}/lib/server"
+loader.env.PATH = "{{ java_home }}/bin:/usr/bin:/bin"
+loader.env.JAVA_HOME = "{{ java_home }}"
+loader.env.SPARK_HOME = "{{ spark_home }}"
+loader.env.HOME = "{{ work_dir }}"
+loader.env.SPARK_SCALA_VERSION = "2.12"
+# INSECURE (bring-up only): replaced by RA-TLS secret provisioning.
+loader.env.SOTERIA_MASTER_KEYS = { passthrough = true }
+# Lets enclave-discovery.sh advertise the enclave resource under gramine-direct.
+loader.env.SOTERIA_FAKE_ENCLAVE = { passthrough = true }
+
+fs.mounts = [
+  { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
+  { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
+  { path = "/usr", uri = "file:/usr" },
+  { path = "/etc", uri = "file:/etc" },
+  { path = "{{ spark_home }}", uri = "file:{{ spark_home }}" },
+  { path = "{{ here }}", uri = "file:{{ here }}" },
+{%- for dir in [soteria_dir, work_dir] if not (dir + "/").startswith(here + "/") %}
+  { path = "{{ dir }}", uri = "file:{{ dir }}" },
+{%- endfor %}
+  { type = "tmpfs", path = "/tmp" },
+]
+
+sys.stack.size = "8M"
+sys.enable_extra_runtime_domain_names_conf = true
+
+sgx.debug = {{ debug }}
+sgx.edmm_enable = {{ edmm }}
+sgx.use_exinfo = {{ use_exinfo }}
+sgx.enclave_size = "{{ enclave_size }}"
+sgx.max_threads = {{ max_threads }}
+sgx.remote_attestation = "{{ remote_attestation }}"
+
+sgx.trusted_files = [
+  "file:{{ gramine.libos }}",
+  "file:{{ gramine.runtimedir() }}/",
+  "file:{{ arch_libdir }}/",
+  "file:/usr{{ arch_libdir }}/",
+  "file:{{ java_home }}/",
+  "file:/usr/bin/bash",
+  "file:{{ spark_home }}/jars/",
+  "file:{{ soteria_dir }}/",
+  "file:{{ here }}/hello/",
+  "file:{{ discovery_script }}",
+]
+
+# Host files the JVM reads but that are not measured. Spark's work and log
+# directory is writable; data leaving the enclave there is protected by
+# Spark I/O encryption and Parquet encryption, not by Gramine.
+sgx.allowed_files = [
+  "file:/etc/hosts",
+  "file:/etc/host.conf",
+  "file:/etc/gai.conf",
+  "file:/etc/nsswitch.conf",
+  "file:/etc/passwd",
+  "file:/etc/group",
+  "file:/etc/localtime",
+  "file:{{ spark_home }}/conf/",
+  "file:{{ work_dir }}/",
+]

@@ -7,7 +7,7 @@ The main goal of SOTERIA, besides providing alternatives for state-of-the-art so
 
 **Warning 2**: This is an academic proof-of-concept prototype and has not received careful code review. This implementation is NOT ready for production use.
 
-**Warning 3**: The deployment files in `graphene-sgx-spark/` target Graphene v1.0 and are kept for reference. Newer Gramine versions need the new manifests (roadmap phase 3).
+**Warning 3**: The original Graphene v1.0 / Ubuntu 18.04 deployment files are kept in `legacy/` for reference only. The current Gramine setup is in `gramine/`.
 
 ### Status and roadmap
 
@@ -97,23 +97,27 @@ session.saveEncrypted(results, "results.enc")
 
 ### Installation
 
-Follow these steps to set up SOTERIA:
+Supported: Rocky/RHEL 9.4+ and Ubuntu 22.04/24.04. The scripts use `sudo` for package installation.
 
-1. **Install SGX Drivers and SDK**: Run the `install_sgx.sh` script.
+1. **Build tools** (OpenJDK 17, sbt, make, git):
    ```bash
-   sudo bash scripts/install_sgx.sh
+   scripts/install_build_deps.sh
+   sbt test
+   scripts/local-cluster/run.sh
    ```
-
-2. **Set up Cloudera Cluster**: SOTERIA was tested with Cloudera. Run the `install_cluster.sh` script.
+2. **Apache Spark** (the version in `build.sbt`, into `/opt/spark`):
    ```bash
-   sudo bash scripts/install_cluster.sh
+   scripts/install_spark.sh
    ```
-
-3. **Build Spark with Graphene**: Navigate to the `graphene-sgx-spark/spark` directory and use `make`.
+3. **Gramine** (works without SGX through `gramine-direct`):
    ```bash
-   cd graphene-sgx-spark/spark
-   make
+   scripts/install_gramine.sh
    ```
+4. **SGX machine check** (Intel SGX PSW/DCAP installation follows once SGX is enabled in the BIOS):
+   ```bash
+   scripts/check_sgx.sh
+   ```
+5. **Run Spark under Gramine**: see [`gramine/README.md`](gramine/README.md).
 
 ### Usage
 
@@ -171,48 +175,12 @@ If you need to cite our work:
 
 ## Dependencies
 
-SOTERIA is implemented in Scala, Java, and C. It requires:
-- Intel SGX SDK
-- Apache Spark
-- Gramine (formerly Graphene)
+SOTERIA is implemented in Scala and runs on:
+- OpenJDK 17 and Apache Spark 3.5
+- Gramine (>= 1.6) for running Spark inside SGX enclaves
+- Intel SGX PSW and DCAP (in-kernel SGX driver, Linux >= 5.11 or RHEL 9.4+)
 
-Tested OS: Ubuntu 18.04 SP2
-
-**NOTE**: This has been tested in Ubuntu 18.04, it has not been tested in newer OS versions.
-
-### Apache Spark
-
-To install Apache Spark to test the vanilla version, please run and see `build.sh` in [`scripts`](https://github.com/claudiavmbrito/Soteria/tree/main/scripts).
-
-#### Data Encryption
-
-For easy to use encryption, we implement an encryption mechanism based on AES-GCM 128. Such file is implemented inside of Apache Spark allowing its broad use outside SOTERIA.
-
-
-### Intel SGX
-
-To install SGX SDK and its Driver, please see `install_sgx.sh` and run:
-
-```
-bash ./install_sgx.sh
-```
-
-### Gramine 
-
-- To use the previous and base code of Gramine used to develop SOTERIA, please refer to https://github.com/gramineproject/gramine/tree/v1.0.
-- To use the updated version of Gramine, follow [Gramine](https://github.com/gramineproject/gramine) documentation. 
-- The manifest files need to be carefully changed to work with the new versions of Gramine. 
----
-
-### Cluster in Cloudera 
-
-To install Cloudera version for which SOTERIA was tested, please see `install_cluster.sh` and run:
-
-```
-bash ./install_cluster.sh
-```
-
-Then, change the Manifest directories accordingly.
+The original prototype used Graphene v1.0, SGX SDK 2.8, Ubuntu 18.04 and Cloudera CDH 6.3.2; those files are in `legacy/`.
 
 <!--
 ___
