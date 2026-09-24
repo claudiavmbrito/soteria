@@ -11,12 +11,12 @@ The main goal of SOTERIA, besides providing alternatives for state-of-the-art so
 
 ### Status and roadmap
 
-The Scala library in `src/` currently runs on plain Spark only: it classifies each operation as sensitive (enclave) or non-sensitive (untrusted) and logs that decision, but **it does not yet run anything in an enclave and it reads datasets as plaintext**. The v2.0 rebuild proceeds in phases:
+The Scala library in `src/` stores datasets as encrypted Parquet (AES-GCM) and classifies each operation as sensitive (enclave) or non-sensitive (untrusted), but **it does not yet run anything in an enclave**: zone decisions are logged, not enforced. The v2.0 rebuild proceeds in phases:
 
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Builds on Spark 3.5 / Java 17, honest APIs, unit tests, CI | done |
-| 1 | Encrypted storage: Parquet modular encryption (AES-GCM) with a SOTERIA KMS client | planned |
+| 1 | Encrypted storage: Parquet modular encryption (AES-GCM) with a SOTERIA KMS client | done |
 | 2 | Real computation partitioning (SML-1 / SML-2) via Spark stage-level scheduling, plus a leakage auditor | planned |
 | 3 | Gramine (>= 1.8) manifests, SGX2 + DCAP attestation, RA-TLS key provisioning | planned |
 | 4 | Reproduce the paper's evaluation (ALS, Bayes, GBT, K-Means, LDA, Linear, LR, PCA) vs. vanilla Spark | planned |
@@ -29,6 +29,31 @@ Requires Java 17 and sbt.
 sbt test                                          # unit tests on local Spark
 sbt "runMain examples.SoteriaExamples"           # runs on local[*]
 sbt assembly                                      # fat jar (Spark is "provided")
+```
+
+### Encrypted datasets
+
+Datasets are stored with [Parquet modular encryption](https://parquet.apache.org/docs/file-format/data-pages/encryption/): every page and the footer are encrypted and authenticated with AES-GCM, so tampered files fail to load. Data keys are wrapped with a SOTERIA master key that is resolved per process, never shipped through the Spark configuration:
+
+1. `SOTERIA_MASTER_KEYS=id:base64key[,id2:base64key]` (environment), or
+2. `SOTERIA_MASTER_KEYS_FILE=/path/to/keys` (same format, one per line), or
+3. `SoteriaKeyStore.register(id, key)` in-process (local mode and tests).
+
+In an SGX deployment (phase 3) these are filled in by Gramine secret provisioning after remote attestation, so only attested enclaves hold master keys.
+
+Encrypt a dataset on the data owner's machine, before uploading it:
+
+```bash
+export SOTERIA_MASTER_KEYS="soteria-master:$(openssl rand -base64 16)"
+spark-submit --class soteria.crypto.EncryptDataset soteria.jar data.csv data.enc --format csv
+```
+
+Then, in a job with the same key provisioned:
+
+```scala
+val session = SoteriaCore.createSession("train", SoteriaConfig(requireProvisionedKey = true))
+val train = session.loadEncryptedDataset[ClassificationData]("data.enc")
+session.saveEncrypted(results, "results.enc")
 ```
 
 ### Installation
