@@ -3,13 +3,58 @@
 **SOTERIA** is a privacy-preserving machine learning solution developed on top of [Apache Spark](https://github.com/apache/spark) using Intel SGX for secure computation. It employs computation partitioning to perform sensitive computing tasks within secure enclaves and non-sensitive tasks outside.
 The main goal of SOTERIA, besides providing alternatives for state-of-the-art solutions is to improve the security of running these workloads in the real world.
 
-**Warning 1**: This repository is being updated.
+**Warning 1**: This repository is being rebuilt (v2.0) for current Intel SGX (DCAP) and Gramine. See [Status and roadmap](#status-and-roadmap) and [docs/REBUILD_PLAN.md](docs/REBUILD_PLAN.md).
 
 **Warning 2**: This is an academic proof-of-concept prototype and has not received careful code review. This implementation is NOT ready for production use.
 
-**Warning 3**: Please be aware that this proof-of-concept is based on Graphene's implementation v1.0. Newer versions may be incompatible. 
+**Warning 3**: The deployment files in `graphene-sgx-spark/` target Graphene v1.0 and are kept for reference. Newer Gramine versions need the new manifests (roadmap phase 3).
 
-**Version Note**: This is SOTERIA v1.0, implementing the core SGX-based privacy-preserving ML framework with computation partitioning. Advanced security features like attack detection and pattern analysis are planned for future versions.
+### Status and roadmap
+
+The Scala library in `src/` stores datasets as encrypted Parquet (AES-GCM) and classifies each operation as sensitive (enclave) or non-sensitive (untrusted), but **it does not yet run anything in an enclave**: zone decisions are logged, not enforced. The v2.0 rebuild proceeds in phases:
+
+| Phase | Scope | Status |
+|---|---|---|
+| 0 | Builds on Spark 3.5 / Java 17, honest APIs, unit tests, CI | done |
+| 1 | Encrypted storage: Parquet modular encryption (AES-GCM) with a SOTERIA KMS client | done |
+| 2 | Real computation partitioning (SML-1 / SML-2) via Spark stage-level scheduling, plus a leakage auditor | planned |
+| 3 | Gramine (>= 1.8) manifests, SGX2 + DCAP attestation, RA-TLS key provisioning | planned |
+| 4 | Reproduce the paper's evaluation (ALS, Bayes, GBT, K-Means, LDA, Linear, LR, PCA) vs. vanilla Spark | planned |
+
+### Build and test
+
+Requires Java 17 and sbt.
+
+```bash
+sbt test                                          # unit tests on local Spark
+sbt "runMain examples.SoteriaExamples"           # runs on local[*]
+sbt assembly                                      # fat jar (Spark is "provided")
+```
+
+### Encrypted datasets
+
+Datasets are stored with [Parquet modular encryption](https://parquet.apache.org/docs/file-format/data-pages/encryption/): every page and the footer are encrypted and authenticated with AES-GCM, so tampered files fail to load. Data keys are wrapped with a SOTERIA master key that is resolved per process, never shipped through the Spark configuration:
+
+1. `SOTERIA_MASTER_KEYS=id:base64key[,id2:base64key]` (environment), or
+2. `SOTERIA_MASTER_KEYS_FILE=/path/to/keys` (same format, one per line), or
+3. `SoteriaKeyStore.register(id, key)` in-process (local mode and tests).
+
+In an SGX deployment (phase 3) these are filled in by Gramine secret provisioning after remote attestation, so only attested enclaves hold master keys.
+
+Encrypt a dataset on the data owner's machine, before uploading it:
+
+```bash
+export SOTERIA_MASTER_KEYS="soteria-master:$(openssl rand -base64 16)"
+spark-submit --class soteria.crypto.EncryptDataset soteria.jar data.csv data.enc --format csv
+```
+
+Then, in a job with the same key provisioned:
+
+```scala
+val session = SoteriaCore.createSession("train", SoteriaConfig(requireProvisionedKey = true))
+val train = session.loadEncryptedDataset[ClassificationData]("data.enc")
+session.saveEncrypted(results, "results.enc")
+```
 
 ### Installation
 
