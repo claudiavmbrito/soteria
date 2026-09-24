@@ -32,6 +32,18 @@ sbt assembly                                      # fat jar (Spark is "provided"
 scripts/local-cluster/run.sh                      # SML-2 placement check on a real standalone cluster
 ```
 
+### SGX machine preflight (phase 3, step 1)
+
+Before the Gramine bring-up, run this on the SGX machine (Rocky/RHEL 9.4+ or Ubuntu 22.04/24.04; no root needed):
+
+```bash
+scripts/check_sgx.sh
+```
+
+It checks the OS and kernel, the SGX CPU flags and device nodes, the Intel PSW/DCAP packages and `aesmd`, PCCS reachability, Gramine (including SGX2/EDMM), Java 17 and SELinux, and reports OK/WARN/FAIL for each.
+
+On Rocky Linux 9: in-kernel SGX needs 9.4 or later, Intel publishes a RHEL 9.4 RPM repository for the SGX PSW/DCAP, and Gramine's EL9 packages are marked experimental (building from source is the fallback).
+
 ### Computation partitioning (SML-1 / SML-2)
 
 Every stage runs on the application's **default resource profile**, which requires the custom `enclave` resource. Only workers running inside an enclave advertise it (see `scripts/local-cluster/enclave-discovery.sh`), so any stage that is not explicitly placed elsewhere, including whole MLlib trainers, runs in an enclave.

@@ -208,3 +208,21 @@ Develop on `soteria-v2`, with one commit per phase or sub-step, and push after e
 
   Last run: 203 enclave-profile tasks, all on enclave executors; 50 untrusted-profile tasks. It also runs in CI.
 
+## Phase 3 notes
+
+- The SGX machine runs **Rocky Linux 9**. Requirements:
+  - Rocky 9.4+ for in-kernel SGX (`/dev/sgx_enclave`).
+  - Intel's RHEL 9.4 RPM repository for PSW/DCAP.
+  - Gramine from its RPM repo. EL9 support there is experimental; the fallback is a source build.
+  - Possibly an SELinux policy.
+- Step 1, done: `scripts/check_sgx.sh`, a read-only preflight covering:
+  - OS/kernel, SGX flags (`sgx`, `sgx_lc`) and device nodes
+  - PSW/DCAP packages, `aesmd`
+  - PCCS reachability from `/etc/sgx_default_qcnl.conf`
+  - Gramine and `is-sgx-available` (SGX2/EDMM)
+  - Java 17, SELinux
+- Next:
+  - Distro-aware `install_sgx.sh` / `install_gramine.sh` (dnf on EL9, apt on Ubuntu), driven by the preflight output from the Rocky machine.
+  - Then the `gramine/` manifests (JDK path as a Makefile variable, default `/usr/lib/jvm/java-17-openjdk`).
+  - The legacy Ubuntu 18.04 scripts and `graphene-sgx-spark/` move to `legacy/` once their replacements exist.
+
