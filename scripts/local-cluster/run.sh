@@ -14,7 +14,16 @@ HERE="$ROOT/scripts/local-cluster"
 MASTER_PORT="${MASTER_PORT:-7077}"
 MASTER="spark://127.0.0.1:$MASTER_PORT"
 PIDS=()
-cleanup() { for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done; }
+cleanup() {
+  status=$?
+  for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
+  if [[ $status -ne 0 ]]; then
+    echo "== failed (exit $status); logs from $WORK:"
+    for f in "$WORK"/*.log "$WORK"/*/app-*/*/stderr; do
+      [[ -f "$f" ]] && { echo "--- $f"; tail -n 40 "$f"; }
+    done
+  fi
+}
 trap cleanup EXIT
 
 JAVA_OPTS=(
@@ -29,7 +38,10 @@ JAVA_OPTS=(
 
 echo "== building jars"
 cd "$ROOT"
-sbt -batch package Test/package "export Test/fullClasspath" | tail -1 > "$WORK/classpath"
+sbt -batch package Test/package "export Test/fullClasspath" > "$WORK/sbt.log" 2>&1
+# `export` prints the classpath as the last plain (non-log) line.
+grep -v '^\[' "$WORK/sbt.log" | grep '\.jar' | tail -1 > "$WORK/classpath"
+[[ -s "$WORK/classpath" ]] || { echo "could not read the test classpath from sbt"; exit 1; }
 
 # A minimal SPARK_HOME: Workers build executor command lines from $SPARK_HOME/jars.
 export SPARK_HOME="$WORK/spark-home"
