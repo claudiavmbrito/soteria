@@ -33,14 +33,7 @@ class SoteriaCoreSuite extends SparkTestBase {
     assert(EncryptionUtils.decrypt(ct, key, aad).get.sameElements(plaintext))
   }
 
-  test("operations are classified into computation zones") {
-    import ComputationPartitioner._
-    assert(getComputationZone("gradient_computation") == EnclaveZone)
-    assert(getComputationZone("MODEL_UPDATE") == EnclaveZone)
-    assert(getComputationZone("result_aggregation") == UntrustedZone)
-  }
-
-  test("loadEncryptedDataset reads Parquet and executeWithPartitioning runs the computation") {
+  test("loadEncryptedDataset reads plain Parquet too, and statistic aggregates it") {
     val spark = session.spark
     import spark.implicits._
     val dir = Files.createTempDirectory("soteria").resolve("data").toString
@@ -49,8 +42,7 @@ class SoteriaCoreSuite extends SparkTestBase {
 
     val ds = session.loadEncryptedDataset[ClassificationData](dir)
     assert(ds.encryptionKey == session.masterKey)
-    val labelSum = session.executeWithPartitioning(ds, "model_update", (d: org.apache.spark.sql.Dataset[ClassificationData]) =>
-      d.collect().map(_.label).sum)
+    val labelSum = session.statistic(ds.data.rdd)(0.0)((acc, p) => acc + p.label, _ + _)
     assert(labelSum == 1.0)
   }
 }

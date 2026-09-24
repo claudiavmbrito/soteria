@@ -71,11 +71,11 @@ The formal protocol is in `proofs/Soteria_Proof.pdf`:
 
 ### 4. SML-2 computation partitioning with real Spark scheduling
 The paper's "double worker" becomes two Spark Workers per node:
-- **Trusted worker:** runs under `gramine-sgx`. It advertises a custom resource `soteria.enclave=1` (`spark.worker.resource.soteria.enclave.amount` plus a discovery script that checks for `/dev/attestation`).
+- **Trusted worker:** runs under `gramine-sgx`. It advertises a custom resource `enclave=1` (`spark.worker.resource.enclave.amount` plus a discovery script that checks for `/dev/attestation`).
 - **Untrusted worker:** native, with no such resource.
 
 Routing uses Spark **stage-level scheduling** (`ResourceProfileBuilder` + `rdd.withResources`). In standalone mode this needs `spark.dynamicAllocation.enabled=true` and `shuffleTracking.enabled=true`.
-- `EnclaveProfile`: requires task resource `soteria.enclave`. Stages that read or decrypt raw data run here.
+- `EnclaveProfile`: requires task resource `enclave`. Stages that read or decrypt raw data run here.
 - `UntrustedProfile`: default executors. Stages that only consume aggregates run here.
 
 The **driver** (the paper's Master, holding the model) always runs inside Gramine.
@@ -125,7 +125,7 @@ In **SML-1**, all profiles map to enclave executors. The mode is a single config
   - A tampered ciphertext makes the read fail. This is the B.2 integrity property.
   - An executor without the key can't read the data.
 
-**Phase 2: Partitioning API + algorithms (local and gramine-direct)**
+**Phase 2: Partitioning API + algorithms (local and gramine-direct)**: done
 - Add `SoteriaSession` (mode, profiles), `sensitive`/`nonSensitive` and `LeakageAuditor`.
 - Port all 8 algorithms. Each needs an accuracy test against vanilla MLlib on synthetic data.
 - Local tests fake the enclave resource with a discovery script, so the scheduling split can be asserted from `SparkListener` task→executor events.
@@ -184,4 +184,45 @@ Develop on `soteria-v2`, with one commit per phase or sub-step, and push after e
   - an ephemeral dev key with a warning when no key is provisioned
 - Integrity finding: Parquet authenticates each module only when it is read. Flipping a byte in a module that a query never reads (e.g. page indexes on a full scan) doesn't fail that query, and it also can't change the query's result. The test asserts the real property across ~40 positions: tampering either fails the read or leaves the result unchanged.
 - Caveat for phase 2/3: the Hadoop conf only names the KMS client class; keys stay in the key store. In SML-2 the untrusted executors will have no key, so they cannot read any dataset. This is the intended split.
+
+## Phase 2 notes
+
+- **Design change: fail-safe default.** The *default* resource profile is the enclave one: it requires the `enclave` resource, which only enclave workers advertise. Only statistic combines use a separate untrusted profile. Anything not explicitly placed outside therefore runs in an enclave, including the stages MLlib creates internally. The original plan had an explicit enclave profile and a default untrusted one; that would have leaked MLlib's internal stages.
+- The resource is named `enclave`, not `soteria.enclave`, because Spark resource names can't contain dots.
+- `soteria.partition`:
+  - `SoteriaMode` (SML1 / SML2, also `spark.soteria.mode`)
+  - `ComputationPartitioner`: profiles, `untrusted`, `statistic`, cluster config validation
+  - `LeakageAuditor`: walks the lineage. Narrow dependencies are followed, only statistic shuffles are allowed, and sources must be declared public.
+- Partitioned trainers:
+  - LR: L-BFGS over loss and gradient sums.
+  - Linear: normal equations.
+  - K-Means: per-cluster sums.
+  - Naive Bayes: per-class counts.
+  - PCA: Gram matrix.
+  - Each matches MLlib in `SoteriaMLSuite`: LR within 1e-4, linear within 1e-8, NB within 1e-9, PCA within 1e-6, K-Means cost within 1%.
+- Enclave-only trainers: ALS, GBT and LDA wrap MLlib.
+- Removed the old string-based `executeWithPartitioning`, `ComputationPartitioner` object and `SecurityUtils` placeholders.
+- `scripts/local-cluster/run.sh` starts a real standalone cluster: an "enclave" worker with the resource and the key, and an untrusted worker without either. It runs `soteria.it.SchedulingCheck`, which asserts from scheduler events that:
+  - every default-profile task ran on an enclave executor;
+  - untrusted executors ran only statistic combines.
+
+  Last run: 203 enclave-profile tasks, all on enclave executors; 50 untrusted-profile tasks. It also runs in CI.
+
+## Phase 3 notes
+
+- The SGX machine runs **Rocky Linux 9**. Requirements:
+  - Rocky 9.4+ for in-kernel SGX (`/dev/sgx_enclave`).
+  - Intel's RHEL 9.4 RPM repository for PSW/DCAP.
+  - Gramine from its RPM repo. EL9 support there is experimental; the fallback is a source build.
+  - Possibly an SELinux policy.
+- Step 1, done: `scripts/check_sgx.sh`, a read-only preflight covering:
+  - OS/kernel, SGX flags (`sgx`, `sgx_lc`) and device nodes
+  - PSW/DCAP packages, `aesmd`
+  - PCCS reachability from `/etc/sgx_default_qcnl.conf`
+  - Gramine and `is-sgx-available` (SGX2/EDMM)
+  - Java 17, SELinux
+- Next:
+  - Distro-aware `install_sgx.sh` / `install_gramine.sh` (dnf on EL9, apt on Ubuntu), driven by the preflight output from the Rocky machine.
+  - Then the `gramine/` manifests (JDK path as a Makefile variable, default `/usr/lib/jvm/java-17-openjdk`).
+  - The legacy Ubuntu 18.04 scripts and `graphene-sgx-spark/` move to `legacy/` once their replacements exist.
 

@@ -17,12 +17,8 @@ object SoteriaExamples {
   def main(args: Array[String]): Unit = {
     println("=== SOTERIA Privacy-Preserving ML Examples ===")
     
-    // Configuration
-    val config = SoteriaConfig(
-      enclaveEnabled = true,
-      encryptionEnabled = true,
-      partitioningStrategy = "COMPUTATION_PARTITIONING"
-    )
+    // Mode comes from spark.soteria.mode (default SML2)
+    val config = SoteriaConfig()
     
     // Create SOTERIA session
     val session = SoteriaCore.createSession("SoteriaExamples", config)
@@ -106,7 +102,7 @@ object SoteriaExamples {
     val encryptedDataset = EncryptedDataset(classificationDF.as[ClassificationData], session.masterKey)
     
     // Train SOTERIA Logistic Regression model
-    val logisticRegression = new SoteriaLogisticRegression(session, maxIterations = 100, stepSize = 1.0)
+    val logisticRegression = new SoteriaLogisticRegression(session, maxIterations = 100, regParam = 0.01)
     val model = logisticRegression.train(encryptedDataset)
     
     println(s"[SOTERIA] Trained Logistic Regression model")
@@ -150,14 +146,8 @@ object SoteriaExamples {
     val model = als.train(encryptedDataset)
     
     println(s"[SOTERIA] Trained ALS model with rank ${model.rank}")
-    println(s"[SOTERIA] Number of user factors: ${model.userFactors.size}")
-    println(s"[SOTERIA] Number of item factors: ${model.itemFactors.size}")
-    
-    // Test prediction
-    val testUser = 1
-    val testItem = 1
-    val prediction = model.predict(testUser, testItem)
-    println(s"[SOTERIA] Predicted rating for user $testUser, item $testItem: $prediction")
+    println(s"[SOTERIA] Number of user factors: ${model.userFactors.count()}")
+    println(s"[SOTERIA] Number of item factors: ${model.itemFactors.count()}")
   }
   
   /**
@@ -184,8 +174,8 @@ object SoteriaExamples {
     val naiveBayes = new SoteriaNaiveBayes(session)
     val model = naiveBayes.train(encryptedDataset)
     
-    println(s"[SOTERIA] Trained Naive Bayes model")
-    println(s"[SOTERIA] Model type: ${model.getClass.getSimpleName}")
+    println(s"[SOTERIA] Trained Naive Bayes model with ${model.numClasses} classes")
+    println(s"[SOTERIA] Prediction for (1, 1, 0): ${model.predict(Vectors.dense(1.0, 1.0, 0.0))}")
   }
   
   /**
@@ -208,7 +198,7 @@ object SoteriaExamples {
     val encryptedDataset = EncryptedDataset(regressionDF.as[RegressionData], session.masterKey)
     
     // Train SOTERIA Linear Regression model
-    val linearRegression = new SoteriaLinearRegression(session, maxIter = 100, regParam = 0.1)
+    val linearRegression = new SoteriaLinearRegression(session, regParam = 0.1)
     val model = linearRegression.train(encryptedDataset)
     
     println(s"[SOTERIA] Trained Linear Regression model")
@@ -236,7 +226,7 @@ object SoteriaExamples {
     val encryptedDataset = EncryptedDataset(regressionDF.as[RegressionData], session.masterKey)
     
     // Train SOTERIA GBT model
-    val gbt = new SoteriaGBT(session, maxIter = 50)
+    val gbt = new SoteriaGBT(session, maxIter = 20)
     val model = gbt.train(encryptedDataset)
     
     println(s"[SOTERIA] Trained Gradient Boosted Trees model")
@@ -265,8 +255,8 @@ object SoteriaExamples {
     val pca = new SoteriaPCA(session, k = 3)
     val model = pca.train(encryptedDataset)
     
-    println(s"[SOTERIA] Trained PCA model")
-    println(s"[SOTERIA] Reduced dimensionality from 10 to 3")
+    println(s"[SOTERIA] Trained PCA model: 10 -> 3 dimensions")
+    println(s"[SOTERIA] Explained variance: ${model.explainedVariance.toArray.map(v => f"$v%.3f").mkString(", ")}")
   }
   
   /**
@@ -297,25 +287,12 @@ object SoteriaExamples {
   }
   
   /**
-   * Shows how operations are classified into computation zones.
+   * Reports how the session placed computation.
    */
   def securityDemo(session: SoteriaSession): Unit = {
     println("\n--- SOTERIA Computation Partitioning ---")
-    
-    val operations = List(
-      "gradient_computation", "model_update", "feature_extraction",
-      "data_loading", "result_aggregation", "visualization"
-    )
-    
-    operations.foreach { op =>
-      val location = ComputationPartitioner.getComputationZone(op) match {
-        case ComputationPartitioner.EnclaveZone => "enclave"
-        case ComputationPartitioner.UntrustedZone => "untrusted"
-      }
-      println(s"  $op -> $location")
-    }
-    
-    println("\n[SOTERIA] Rebuild status: zones are classified but not yet enforced,")
-    println("  and datasets are read as plaintext. See the v2.0 plan in the README.")
+    println(s"  mode: ${session.mode}")
+    println(s"  stages placed on untrusted executors (statistics only): ${session.partitioner.untrustedPlacements}")
+    println("  every other stage uses the default (enclave) resource profile")
   }
 }
