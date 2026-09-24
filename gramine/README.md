@@ -1,9 +1,19 @@
 # Running SOTERIA's Spark JVMs under Gramine
 
 `java.manifest.template` is one Gramine manifest for every SOTERIA JVM that
-must run in an enclave: the driver, the enclave Worker and the executors that
-Worker spawns (as child enclaves of the same manifest). The Spark Master and
-the untrusted Worker run natively.
+handles data: the driver and the executors of the enclave Worker.
+
+| Process | Runs |
+|---|---|
+| Spark Master | natively (schedules only, sees no data) |
+| Enclave Worker daemon | natively; advertises the `enclave` resource and launches its executors through `work/enclave-jdk/bin/java`, a wrapper that starts each executor as a fresh Gramine process |
+| Enclave executors | in Gramine (an SGX enclave with `SGX=1`) |
+| Untrusted Worker and its executors | natively, with no keys |
+| Driver (`run-check`) | in Gramine |
+
+Starting every executor from the host, instead of forking it inside a
+Gramine-hosted Worker, avoids copying a multi-GB JVM on each launch (Gramine
+implements fork by checkpointing the whole process).
 
 Every target runs under `gramine-direct` by default. That needs no SGX, and it
 checks most of the setup: mounts, file lists, and whether the JVM starts under
@@ -54,12 +64,13 @@ SOTERIA_MASTER_KEYS="soteria-master:$(head -c 16 /dev/urandom | base64)" make ru
 
 Step 4 expects the same `PASS` line as `scripts/local-cluster/run.sh`. The
 enclave Worker needs the same `SOTERIA_MASTER_KEYS` in its environment as the
-driver, so start it with the variable set as well.
+driver (its executors inherit it), so start it with the variable set as well.
 
 Once SGX is enabled in the BIOS and `scripts/check_sgx.sh` passes, repeat the
-steps with `SGX=1` (and `EDMM=1` on SGX2). Under `gramine-sgx` the enclave
-Worker advertises the `enclave` resource because `/dev/attestation` exists;
-under `gramine-direct` the Makefile sets `SOTERIA_FAKE_ENCLAVE=1` instead.
+steps with `SGX=1` (and `EDMM=1` on SGX2). With `SGX=1` the enclave
+Worker advertises the `enclave` resource when `/dev/sgx_enclave` exists
+(`SOTERIA_ENCLAVE_RUNNER=gramine-sgx`); with `gramine-direct` the Makefile sets
+`SOTERIA_FAKE_ENCLAVE=1` instead.
 
 ## Known open points
 
@@ -74,6 +85,9 @@ under `gramine-direct` the Makefile sets `SOTERIA_FAKE_ENCLAVE=1` instead.
   crypto-policies `java.config` are symlinks into `/etc` and `/usr/share`. The
   Makefile resolves them, and the manifest mounts the real locations at the
   paths the JVM opens (`Error loading java.security file` otherwise).
+- **Harmless messages in Gramine JVMs.** Hadoop probes `setsid` by forking at
+  startup; inside Gramine that fork can fail (`process creation failed`) and is
+  ignored. Network-interface enumeration is avoided with `SPARK_LOCAL_IP`.
 - **Memory.** The JVM reserves heap, metaspace, code cache and thread stacks
   up front; if the enclave runs out of memory, raise `ENCLAVE_SIZE` or lower
   `JVM_HEAP`.

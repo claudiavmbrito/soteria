@@ -21,8 +21,8 @@ loader.env.HOME = "{{ work_dir }}"
 loader.env.SPARK_SCALA_VERSION = "2.12"
 # INSECURE (bring-up only): replaced by RA-TLS secret provisioning.
 loader.env.SOTERIA_MASTER_KEYS = { passthrough = true }
-# Lets enclave-discovery.sh advertise the enclave resource under gramine-direct.
-loader.env.SOTERIA_FAKE_ENCLAVE = { passthrough = true }
+# Avoids interface enumeration (SIOCGIFCONF), which Gramine does not emulate.
+loader.env.SPARK_LOCAL_IP = { passthrough = true }
 
 fs.mounts = [
   { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
@@ -46,6 +46,9 @@ fs.mounts = [
   { type = "tmpfs", path = "/tmp" },
 ]
 
+# Executors write to their working directory; Gramine would otherwise start in /.
+fs.start_dir = "{{ work_dir }}"
+
 sys.stack.size = "8M"
 sys.enable_extra_runtime_domain_names_conf = true
 
@@ -68,11 +71,9 @@ sgx.trusted_files = [
 {%- if crypto_java %}
   "file:{{ crypto_java }}",
 {%- endif %}
-  "file:/usr/bin/bash",
   "file:{{ spark_home }}/jars/",
   "file:{{ soteria_dir }}/",
   "file:{{ here }}/hello/",
-  "file:{{ discovery_script }}",
 ]
 
 # Host files the JVM reads but that are not measured. Spark's work and log
