@@ -11,13 +11,13 @@ The main goal of SOTERIA, besides providing alternatives for state-of-the-art so
 
 ### Status and roadmap
 
-The Scala library in `src/` stores datasets as encrypted Parquet (AES-GCM) and classifies each operation as sensitive (enclave) or non-sensitive (untrusted), but **it does not yet run anything in an enclave**: zone decisions are logged, not enforced. The v2.0 rebuild proceeds in phases:
+The Scala library in `src/` stores datasets as encrypted Parquet (AES-GCM) and places computation with Spark stage-level scheduling: stages that touch raw data run on executors holding the `enclave` resource, and in SML-2 only per-partition statistics are combined on untrusted executors. This placement is verified on a real standalone cluster (`scripts/local-cluster/run.sh`). **The enclave itself is not in place yet**: until phase 3, the `enclave` resource is advertised by a plain worker, not by one running inside Gramine-SGX. The v2.0 rebuild proceeds in phases:
 
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Builds on Spark 3.5 / Java 17, honest APIs, unit tests, CI | done |
 | 1 | Encrypted storage: Parquet modular encryption (AES-GCM) with a SOTERIA KMS client | done |
-| 2 | Real computation partitioning (SML-1 / SML-2) via Spark stage-level scheduling, plus a leakage auditor | planned |
+| 2 | Real computation partitioning (SML-1 / SML-2) via Spark stage-level scheduling, plus a leakage auditor | done |
 | 3 | Gramine (>= 1.8) manifests, SGX2 + DCAP attestation, RA-TLS key provisioning | planned |
 | 4 | Reproduce the paper's evaluation (ALS, Bayes, GBT, K-Means, LDA, Linear, LR, PCA) vs. vanilla Spark | planned |
 
@@ -29,7 +29,34 @@ Requires Java 17 and sbt.
 sbt test                                          # unit tests on local Spark
 sbt "runMain examples.SoteriaExamples"           # runs on local[*]
 sbt assembly                                      # fat jar (Spark is "provided")
+scripts/local-cluster/run.sh                      # SML-2 placement check on a real standalone cluster
 ```
+
+### Computation partitioning (SML-1 / SML-2)
+
+Every stage runs on the application's **default resource profile**, which requires the custom `enclave` resource. Only workers running inside an enclave advertise it (see `scripts/local-cluster/enclave-discovery.sh`), so any stage that is not explicitly placed elsewhere, including whole MLlib trainers, runs in an enclave.
+
+In **SML-2** (`spark.soteria.mode=SML2`, the default), `SoteriaSession.statistic` is the only way out of the enclave. It folds each partition into a statistic inside the enclave, such as a gradient sum or per-cluster (sum, count), and combines those statistics on untrusted executors. Those executors hold no keys and never see records. A `LeakageAuditor` checks every untrusted placement and rejects any whose lineage reaches raw data through something other than a statistic. In **SML-1** everything stays in enclaves.
+
+| Algorithm | SML-2 behaviour |
+|---|---|
+| Logistic regression, linear regression, K-Means, naive Bayes, PCA | partitioned: untrusted executors combine statistics |
+| ALS, GBT, LDA | enclave-only (MLlib wrappers) |
+
+The partitioned trainers match MLlib's results (see `SoteriaMLSuite`). Cluster settings for SML-2:
+
+```properties
+spark.executor.cores                                   1
+spark.executor.resource.enclave.amount                 1
+spark.task.resource.enclave.amount                     1
+spark.dynamicAllocation.enabled                        true
+spark.dynamicAllocation.shuffleTracking.enabled        true
+# on enclave workers only:
+spark.worker.resource.enclave.amount                   <slots>
+spark.worker.resource.enclave.discoveryScript          /path/to/enclave-discovery.sh
+```
+
+With a `local[*]` master, placements are audited but not applied, because Spark has no stage-level scheduling in local mode.
 
 ### Encrypted datasets
 

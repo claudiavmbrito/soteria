@@ -1,23 +1,27 @@
 package soteria.core
 
 import org.apache.spark.internal.Logging
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Dataset, SaveMode, SparkSession}
 import soteria.crypto.{ParquetEncryption, SoteriaKeyStore}
+import soteria.partition.{ComputationPartitioner, SML2, SoteriaMode}
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import java.security.SecureRandom
+import scala.reflect.ClassTag
 import scala.util.Try
 
 /**
  * SOTERIA Core Implementation
  * Based on the IEEE paper "Privacy-Preserving Machine Learning on Apache Spark"
  *
- * Status (v2.0 rebuild, phase 1): datasets are stored as encrypted Parquet
- * (AES-GCM, see [[soteria.crypto]]). The computation zones below are only
- * classified and logged: nothing is isolated in an SGX enclave yet. Enclave
- * scheduling (Gramine + stage-level scheduling) is added in later phases.
+ * Datasets are stored as encrypted Parquet (AES-GCM, see [[soteria.crypto]]).
+ * Computation is placed with stage-level scheduling (see
+ * [[soteria.partition.ComputationPartitioner]]): by default every stage runs
+ * on enclave executors; in SML-2, [[SoteriaSession.statistic]] lets
+ * untrusted executors combine per-partition statistics.
  */
 object SoteriaCore extends Logging {
   
@@ -28,11 +32,10 @@ object SoteriaCore extends Logging {
   private val GCM_TAG_LENGTH = 16
   
   case class SoteriaConfig(
-    enclaveEnabled: Boolean = true,
+    // SML1 or SML2; if unset, taken from spark.soteria.mode (default SML2).
+    mode: Option[SoteriaMode] = None,
     encryptionEnabled: Boolean = true,
-    partitioningStrategy: String = "COMPUTATION_PARTITIONING", // or "BASELINE"
     keySize: Int = 128,
-    batchSize: Int = 1000,
     // Master key used for dataset encryption, resolved through SoteriaKeyStore.
     keyId: String = "soteria-master",
     // If false and no key is provisioned, an ephemeral key is generated (local development only).
@@ -46,36 +49,6 @@ object SoteriaCore extends Logging {
     data: Dataset[T],
     encryptionKey: SecretKey
   )
-  
-  /**
-   * Computation partitioning manager
-   * Decides which operations run inside SGX enclaves vs outside
-   */
-  object ComputationPartitioner {
-    
-    sealed trait ComputationZone
-    case object EnclaveZone extends ComputationZone
-    case object UntrustedZone extends ComputationZone
-    
-    /**
-     * Determines computation zone based on operation sensitivity
-     */
-    def getComputationZone(operation: String): ComputationZone = operation match {
-      case op if isSensitiveOperation(op) => EnclaveZone
-      case _ => UntrustedZone
-    }
-    
-    private def isSensitiveOperation(operation: String): Boolean = {
-      val sensitiveOps = Set(
-        "gradient_computation",
-        "model_update", 
-        "feature_extraction",
-        "data_preprocessing",
-        "model_inference"
-      )
-      sensitiveOps.contains(operation.toLowerCase)
-    }
-  }
   
   /**
    * AES-GCM encryption utilities
@@ -121,6 +94,11 @@ object SoteriaCore extends Logging {
    */
   class SoteriaSession(val spark: SparkSession, val config: SoteriaConfig = SoteriaConfig()) {
     
+    val mode: SoteriaMode = config.mode.getOrElse(
+      spark.conf.getOption("spark.soteria.mode").map(SoteriaMode.parse).getOrElse(SML2))
+    
+    val partitioner = new ComputationPartitioner(spark.sparkContext, mode)
+    
     val masterKey: SecretKey = resolveMasterKey()
     
     if (config.encryptionEnabled) ParquetEncryption.configure(spark.sparkContext.hadoopConfiguration)
@@ -151,18 +129,12 @@ object SoteriaCore extends Logging {
     }
     
     /**
-     * Run `computation` in the zone chosen for `operation`.
-     * Zones are not enforced yet: both run on the regular Spark executors.
+     * Folds each partition of `data` into a statistic inside the enclave and
+     * combines the partial statistics (on untrusted executors in SML-2).
+     * `seqOp` may mutate and return its accumulator.
      */
-    def executeWithPartitioning[T, R](
-      dataset: EncryptedDataset[T], 
-      operation: String,
-      computation: Dataset[T] => R
-    ): R = {
-      val zone = ComputationPartitioner.getComputationZone(operation)
-      logInfo(s"$operation -> $zone (zone not enforced: no enclave backend configured)")
-      computation(dataset.data)
-    }
+    def statistic[T, S: ClassTag](data: RDD[T])(zero: => S)(seqOp: (S, T) => S, combOp: (S, S) => S): S =
+      partitioner.statistic(data)(zero)(seqOp, combOp)
     
     def close(): Unit = {
       spark.close()

@@ -17,3 +17,16 @@ jobs:
       - uses: sbt/setup-sbt@v1
       - name: Compile and test
         run: sbt -batch test
+
+  local-cluster:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - name: SML-2 placement on a standalone cluster
+        run: scripts/local-cluster/run.sh

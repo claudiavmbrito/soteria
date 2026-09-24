@@ -1,27 +1,23 @@
 package soteria.ml
 
-import soteria.core.SoteriaCore._
-import org.apache.spark.sql.{Dataset, SparkSession}
-import org.apache.spark.sql.functions._
-import org.apache.spark.ml.feature.VectorAssembler
-import org.apache.spark.ml.linalg.{Vector, Vectors, DenseVector}
-import org.apache.spark.ml.clustering.KMeans
-import org.apache.spark.ml.recommendation.ALS
-import org.apache.spark.ml.classification.{LogisticRegression, DecisionTreeClassifier}
-import org.apache.spark.ml.regression.{LinearRegression, DecisionTreeRegressor}
-import org.apache.spark.ml.evaluation.{MulticlassClassificationEvaluator, RegressionEvaluator}
-import org.apache.spark.sql.types._
+import scala.collection.mutable
+
+import breeze.linalg.{eigSym, DenseMatrix => BDM, DenseVector => BDV}
+import breeze.optimize.{DiffFunction, LBFGS}
+import org.apache.spark.ml.linalg.{DenseMatrix, DenseVector, Vector, Vectors}
 import org.apache.spark.rdd.RDD
-import scala.reflect.ClassTag
-import scala.util.Random
+import soteria.core.SoteriaCore._
 
 /**
- * SOTERIA Machine Learning Implementation
- * Based on the IEEE paper "Privacy-Preserving Machine Learning on Apache Spark"
- * ML algorithms expressed through SoteriaSession.executeWithPartitioning.
+ * SML-2 partitioned trainers (Section 4 of the paper; `docs/REBUILD_PLAN.md`).
+ *
+ * Each trainer touches records only inside enclave stages. What leaves the
+ * enclave, through [[SoteriaSession.statistic]], is a per-partition statistic:
+ * gradient and loss sums, sufficient statistics or counts. The driver, which
+ * runs inside an enclave, turns the combined statistic into a model update.
  */
 object SoteriaML {
-  
+
   // Data structures for different ML tasks
   case class TrainingData(features: Vector, label: Double)
   case class ClusteringData(features: Vector, id: Long)
@@ -30,87 +26,66 @@ object SoteriaML {
   case class RegressionData(features: Vector, label: Double)
   case class LDAData(features: Vector, docId: Long)
   case class PCAData(features: Vector, id: Long)
-  
+
+  private def numFeatures(session: SoteriaSession, rdd: RDD[Vector]): Int = {
+    val d = session.statistic(rdd)(-1)((acc, v) => math.max(acc, v.size), math.max)
+    require(d > 0, "empty training set")
+    d
+  }
+
+  // ---------------------------------------------------------------- K-Means
+
   /**
-   * SOTERIA K-Means Clustering
+   * Lloyd's algorithm with k-means++ seeding. Per iteration, untrusted
+   * executors see per-partition (sum, count) per cluster and the cost.
    */
-  class SoteriaKMeans(session: SoteriaSession, k: Int, maxIterations: Int = 100, seed: Long = 42L) {
-    
+  class SoteriaKMeans(session: SoteriaSession, k: Int, maxIterations: Int = 100, tol: Double = 1e-4, seed: Long = 42L) {
+
     def train(dataset: EncryptedDataset[ClusteringData]): SoteriaKMeansModel = {
-      // Phase 1: data preprocessing and initial centroid selection (sensitive)
-      val (dataRDD, initialCentroids) = session.executeWithPartitioning(
-        dataset,
-        "data_preprocessing",
-        (data: Dataset[ClusteringData]) => {
-          val dataRDD = data.rdd.map(row => (row.id, row.features)).cache()
-          (dataRDD, SoteriaKMeans.selectInitialCentroids(dataRDD, k, seed))
-        }
-      )
-      
-      // Phase 2: iterative clustering with computation partitioning
-      val finalCentroids = performIterativeClustering(dataset, dataRDD, initialCentroids)
-      dataRDD.unpersist()
-      
-      SoteriaKMeansModel(finalCentroids, k)
-    }
-    
-    private def performIterativeClustering(
-      dataset: EncryptedDataset[ClusteringData],
-      dataRDD: RDD[(Long, Vector)],
-      initialCentroids: Array[Vector]
-    ): Array[Vector] = {
-      
-      var centroids = initialCentroids
-      var iteration = 0
-      var converged = false
-      
-      while (iteration < maxIterations && !converged) {
-        val current = centroids
-        // Point-to-centroid assignment
-        val assignments = dataRDD.map { case (_, point) =>
-          (SoteriaKMeans.findClosestCentroid(point, current), (point.toArray, 1L))
-        }
-        
-        // Centroid update (sensitive operation)
-        val newCentroids = session.executeWithPartitioning(
-          dataset,
-          "model_update",
-          (_: Dataset[ClusteringData]) => {
-            val centroidUpdates = assignments.reduceByKey { case ((sum1, count1), (sum2, count2)) =>
-              (sum1.zip(sum2).map { case (a, b) => a + b }, count1 + count2)
-            }.collectAsMap()
-            
-            current.indices.map { i =>
-              centroidUpdates.get(i) match {
-                case Some((sum, count)) => Vectors.dense(sum.map(_ / count))
-                case None => current(i)
-              }
-            }.toArray
+      val points = dataset.data.rdd.map(_.features).cache()
+      try {
+        var centroids = SoteriaKMeans.selectInitialCentroids(points, k, seed)
+        val d = centroids.head.size
+        var iteration = 0
+        var converged = false
+
+        while (iteration < maxIterations && !converged) {
+          val current = centroids
+          // stats layout: k blocks of (d sums, count), then total cost
+          val stats = session.statistic(points)(new Array[Double](k * (d + 1) + 1))(
+            (acc, p) => {
+              val c = SoteriaKMeans.findClosestCentroid(p, current)
+              val base = c * (d + 1)
+              p.foreachActive((j, v) => acc(base + j) += v)
+              acc(base + d) += 1
+              acc(acc.length - 1) += Vectors.sqdist(p, current(c))
+              acc
+            },
+            SoteriaML.addInPlace)
+
+          val updated = Array.tabulate(k) { c =>
+            val base = c * (d + 1)
+            val count = stats(base + d)
+            if (count > 0) Vectors.dense(Array.tabulate(d)(j => stats(base + j) / count)) else current(c)
           }
-        )
-        
-        val maxDelta = current.zip(newCentroids).map { case (old, newC) =>
-          Vectors.sqdist(old, newC)
-        }.max
-        
-        converged = maxDelta < 1e-6
-        centroids = newCentroids
-        iteration += 1
-      }
-      
-      centroids
+          converged = current.zip(updated).forall { case (a, b) => math.sqrt(Vectors.sqdist(a, b)) < tol }
+          centroids = updated
+          iteration += 1
+        }
+        SoteriaKMeansModel(centroids, k)
+      } finally points.unpersist()
     }
   }
-  
+
   object SoteriaKMeans {
     private val InitSampleSize = 10000
-    
-    /** k-means++ seeding over a bounded random sample of the data. */
-    private[ml] def selectInitialCentroids(dataRDD: RDD[(Long, Vector)], k: Int, seed: Long): Array[Vector] = {
-      val sample = dataRDD.takeSample(withReplacement = false, InitSampleSize, seed).map(_._2)
+
+    /** k-means++ seeding over a bounded random sample, computed on the driver (inside the enclave). */
+    private[ml] def selectInitialCentroids(points: RDD[Vector], k: Int, seed: Long): Array[Vector] = {
+      val sample = points.takeSample(withReplacement = false, InitSampleSize, seed)
       require(sample.length >= k, s"need at least $k points, got ${sample.length}")
-      val rnd = new Random(seed)
-      val centroids = scala.collection.mutable.ArrayBuffer(sample(rnd.nextInt(sample.length)))
+      val rnd = new scala.util.Random(seed)
+      val centroids = mutable.ArrayBuffer(sample(rnd.nextInt(sample.length)))
       val dist = sample.map(p => Vectors.sqdist(p, centroids.head))
       while (centroids.length < k) {
         // Pick the next centroid with probability proportional to squared distance.
@@ -123,261 +98,264 @@ object SoteriaML {
       }
       centroids.toArray
     }
-    
+
     private[ml] def findClosestCentroid(point: Vector, centroids: Array[Vector]): Int = {
-      centroids.indices.minBy(i => Vectors.sqdist(point, centroids(i)))
+      var best = 0
+      var bestDist = Double.PositiveInfinity
+      var i = 0
+      while (i < centroids.length) {
+        val dist = Vectors.sqdist(point, centroids(i))
+        if (dist < bestDist) { bestDist = dist; best = i }
+        i += 1
+      }
+      best
     }
   }
-  
+
   case class SoteriaKMeansModel(centroids: Array[Vector], k: Int) {
     def predict(point: Vector): Int = SoteriaKMeans.findClosestCentroid(point, centroids)
+
+    def cost(points: Seq[Vector]): Double = points.map(p => Vectors.sqdist(p, centroids(predict(p)))).sum
   }
-  
+
+  // ---------------------------------------------------- Logistic regression
+
   /**
-   * SOTERIA Logistic Regression (full-batch gradient descent)
+   * Binary logistic regression (labels 0/1) trained with L-BFGS on the driver.
+   * Minimizes mean log-loss + regParam / 2 * ||w||^2 (intercept not
+   * regularized). Per iteration, untrusted executors see per-partition sums
+   * of the loss and gradient.
    */
-  class SoteriaLogisticRegression(session: SoteriaSession, maxIterations: Int = 100, stepSize: Double = 0.01) {
-    
+  class SoteriaLogisticRegression(
+    session: SoteriaSession,
+    maxIterations: Int = 100,
+    regParam: Double = 0.0,
+    tol: Double = 1e-6
+  ) {
+
     def train(dataset: EncryptedDataset[ClassificationData]): SoteriaLogisticRegressionModel = {
-      val (weights, intercept) = session.executeWithPartitioning(
-        dataset,
-        "gradient_computation",
-        (data: Dataset[ClassificationData]) => {
-          val trainingRDD = data.rdd.cache()
-          val numExamples = trainingRDD.count().toDouble
-          require(numExamples > 0, "empty training set")
-          
-          val numFeatures = trainingRDD.first().features.size
-          var weights = Array.fill(numFeatures)(0.0)
-          var intercept = 0.0
-          
-          for (_ <- 1 to maxIterations) {
-            val (gradSum, errSum) = SoteriaLogisticRegression.computeGradient(trainingRDD, weights, intercept)
-            weights = weights.zip(gradSum).map { case (w, g) => w - stepSize * g / numExamples }
-            intercept -= stepSize * errSum / numExamples
+      val data = dataset.data.rdd.cache()
+      try {
+        val d = numFeatures(session, data.map(_.features))
+
+        val objective = new DiffFunction[BDV[Double]] {
+          override def calculate(x: BDV[Double]): (Double, BDV[Double]) = {
+            val coef = x.toArray
+            val stats = SoteriaLogisticRegression.lossAndGradientSums(session, data, coef)
+            val n = stats(d + 2)
+            val grad = BDV.tabulate(d + 1)(j => stats(j) / n + (if (j < d) regParam * coef(j) else 0.0))
+            var reg = 0.0
+            for (j <- 0 until d) reg += coef(j) * coef(j)
+            (stats(d + 1) / n + regParam / 2 * reg, grad)
           }
-          
-          trainingRDD.unpersist()
-          (Vectors.dense(weights), intercept)
         }
-      )
-      
-      SoteriaLogisticRegressionModel(weights, intercept)
+
+        val optimum = new LBFGS[BDV[Double]](maxIter = maxIterations, m = 10, tolerance = tol)
+          .minimize(objective, BDV.zeros[Double](d + 1))
+        SoteriaLogisticRegressionModel(Vectors.dense(optimum.toArray.take(d)), optimum(d))
+      } finally data.unpersist()
     }
   }
-  
+
   object SoteriaLogisticRegression {
-    private[ml] def sigmoid(x: Double): Double = 1.0 / (1.0 + math.exp(-x))
+    /**
+     * Returns d gradient sums, the intercept gradient sum, the loss sum and the
+     * count. Kept outside the DiffFunction so task closures capture only `coef`.
+     */
+    private[ml] def lossAndGradientSums(session: SoteriaSession, data: RDD[ClassificationData], coef: Array[Double]): Array[Double] = {
+      val d = coef.length - 1
+      session.statistic(data)(new Array[Double](d + 3))(
+        (acc, p) => {
+          val m = margin(coef, p.features)
+          val mult = sigmoid(m) - p.label
+          p.features.foreachActive((j, v) => acc(j) += mult * v)
+          acc(d) += mult
+          acc(d + 1) += softplus(m) - p.label * m
+          acc(d + 2) += 1
+          acc
+        },
+        SoteriaML.addInPlace)
+    }
     
-    private[ml] def margin(weights: Array[Double], features: Vector, intercept: Double): Double = {
-      val f = features.toArray
-      var s = intercept
-      var i = 0
-      while (i < weights.length) { s += weights(i) * f(i); i += 1 }
+    private[ml] def sigmoid(x: Double): Double = 1.0 / (1.0 + math.exp(-x))
+
+    /** log(1 + e^x), computed stably. */
+    private[ml] def softplus(x: Double): Double = if (x > 0) x + math.log1p(math.exp(-x)) else math.log1p(math.exp(x))
+
+    /** coef has d weights followed by the intercept. */
+    private[ml] def margin(coef: Array[Double], features: Vector): Double = {
+      var s = coef(coef.length - 1)
+      features.foreachActive((j, v) => s += coef(j) * v)
       s
     }
-    
-    /** Sum over the data of the gradient w.r.t. weights and intercept. */
-    private[ml] def computeGradient(
-      data: RDD[ClassificationData],
-      weights: Array[Double],
-      intercept: Double
-    ): (Array[Double], Double) = {
-      data.treeAggregate((Array.fill(weights.length)(0.0), 0.0))(
-        seqOp = { case ((grad, errSum), point) =>
-          val error = sigmoid(margin(weights, point.features, intercept)) - point.label
-          val f = point.features.toArray
-          var i = 0
-          while (i < grad.length) { grad(i) += f(i) * error; i += 1 }
-          (grad, errSum + error)
-        },
-        combOp = { case ((g1, e1), (g2, e2)) =>
-          var i = 0
-          while (i < g1.length) { g1(i) += g2(i); i += 1 }
-          (g1, e1 + e2)
-        }
-      )
-    }
   }
-  
+
   case class SoteriaLogisticRegressionModel(weights: Vector, intercept: Double) {
     def probability(features: Vector): Double =
-      SoteriaLogisticRegression.sigmoid(SoteriaLogisticRegression.margin(weights.toArray, features, intercept))
-    
+      SoteriaLogisticRegression.sigmoid(SoteriaLogisticRegression.margin(weights.toArray :+ intercept, features))
+
     def predict(features: Vector): Double = if (probability(features) >= 0.5) 1.0 else 0.0
   }
-  
+
+  // ------------------------------------------------------ Linear regression
+
   /**
-   * SOTERIA Collaborative Filtering (ALS, explicit feedback)
+   * Least squares with an intercept, solved exactly from the normal
+   * equations. Minimizes 1/(2n) * ||y - Xw - b||^2 + regParam / 2 * ||w||^2.
+   * Untrusted executors see per-partition sums of x, y, x x^T and x y.
    */
-  class SoteriaALS(session: SoteriaSession, rank: Int = 10, maxIterations: Int = 20, regParam: Double = 0.01) {
-    
-    def train(dataset: EncryptedDataset[RecommendationData]): SoteriaALSModel = {
-      val (userFactors, itemFactors) = session.executeWithPartitioning(
-        dataset,
-        "model_update",
-        (data: Dataset[RecommendationData]) => {
-          val ratingsRDD = data.rdd.cache()
-          val rnd = new Random(42L)
-          
-          val users = ratingsRDD.map(_.user).distinct().collect()
-          val items = ratingsRDD.map(_.item).distinct().collect()
-          
-          var userFactors = users.map(u => (u, Array.fill(rank)(rnd.nextGaussian() * 0.1))).toMap
-          var itemFactors = items.map(i => (i, Array.fill(rank)(rnd.nextGaussian() * 0.1))).toMap
-          
-          for (_ <- 1 to maxIterations) {
-            userFactors = SoteriaALS.solveFactors(ratingsRDD.map(r => (r.user, r.item, r.rating)), itemFactors, rank, regParam)
-            itemFactors = SoteriaALS.solveFactors(ratingsRDD.map(r => (r.item, r.user, r.rating)), userFactors, rank, regParam)
+  class SoteriaLinearRegression(session: SoteriaSession, regParam: Double = 0.0) {
+
+    def train(dataset: EncryptedDataset[RegressionData]): SoteriaLinearRegressionModel = {
+      val data = dataset.data.rdd
+      val d = numFeatures(session, data.map(_.features))
+      // stats layout: n, sum x (d), sum y, sum x x^T (d*d, row-major), sum x y (d)
+      val xOff = 1; val yOff = 1 + d; val xxOff = 2 + d; val xyOff = 2 + d + d * d
+      val s = session.statistic(data)(new Array[Double](2 + 2 * d + d * d))(
+        (acc, p) => {
+          val x = p.features.toArray
+          acc(0) += 1
+          var i = 0
+          while (i < d) {
+            acc(xOff + i) += x(i)
+            acc(xyOff + i) += x(i) * p.label
+            var j = 0
+            while (j < d) { acc(xxOff + i * d + j) += x(i) * x(j); j += 1 }
+            i += 1
           }
-          
-          ratingsRDD.unpersist()
-          (userFactors, itemFactors)
-        }
-      )
-      
-      SoteriaALSModel(userFactors, itemFactors, rank)
+          acc(yOff) += p.label
+          acc
+        },
+        SoteriaML.addInPlace)
+
+      val n = s(0)
+      val mu = BDV.tabulate(d)(i => s(xOff + i) / n)
+      val yMean = s(yOff) / n
+      val a = BDM.tabulate(d, d)((i, j) => s(xxOff + i * d + j) / n - mu(i) * mu(j) + (if (i == j) regParam else 0.0))
+      val b = BDV.tabulate(d)(i => s(xyOff + i) / n - mu(i) * yMean)
+      val w = a \ b
+      SoteriaLinearRegressionModel(Vectors.dense(w.toArray), yMean - (w dot mu))
     }
   }
-  
-  object SoteriaALS {
-    /**
-     * For each `id`, solve (sum_j f_j f_j^T + lambda * n * I) x = sum_j r_j f_j
-     * over its ratings `(id, otherId, rating)`, holding `otherFactors` fixed.
-     */
-    private[ml] def solveFactors(
-      ratings: RDD[(Int, Int, Float)],
-      otherFactors: Map[Int, Array[Double]],
-      rank: Int,
-      regParam: Double
-    ): Map[Int, Array[Double]] = {
-      val bFactors = ratings.sparkContext.broadcast(otherFactors)
-      val result = ratings.map { case (id, other, rating) => (id, (other, rating)) }
-        .groupByKey()
-        .map { case (id, rs) =>
-          val A = Array.ofDim[Double](rank, rank)
-          val b = Array.fill(rank)(0.0)
-          var n = 0
-          rs.foreach { case (other, rating) =>
-            val f = bFactors.value(other)
-            for (i <- 0 until rank; j <- 0 until rank) A(i)(j) += f(i) * f(j)
-            for (i <- 0 until rank) b(i) += rating * f(i)
-            n += 1
-          }
-          for (i <- 0 until rank) A(i)(i) += regParam * n
-          (id, solveLinearSystem(A, b))
-        }
-        .collect()
-        .toMap
-      bFactors.destroy()
-      result
-    }
-    
-    /** Gaussian elimination with partial pivoting. Mutates `A` and `b`. */
-    private[soteria] def solveLinearSystem(A: Array[Array[Double]], b: Array[Double]): Array[Double] = {
-      val n = b.length
-      for (col <- 0 until n) {
-        val pivotRow = (col until n).maxBy(r => math.abs(A(r)(col)))
-        if (pivotRow != col) {
-          val tmpRow = A(col); A(col) = A(pivotRow); A(pivotRow) = tmpRow
-          val tmpB = b(col); b(col) = b(pivotRow); b(pivotRow) = tmpB
-        }
-        val pivot = A(col)(col)
-        require(math.abs(pivot) > 1e-12, "singular system")
-        for (r <- col + 1 until n) {
-          val factor = A(r)(col) / pivot
-          for (c <- col until n) A(r)(c) -= factor * A(col)(c)
-          b(r) -= factor * b(col)
-        }
-      }
-      val x = Array.fill(n)(0.0)
-      for (i <- (n - 1) to 0 by -1) {
-        var s = b(i)
-        for (j <- i + 1 until n) s -= A(i)(j) * x(j)
-        x(i) = s / A(i)(i)
-      }
-      x
-    }
-    
-    def computeRMSE(ratings: RDD[RecommendationData], model: SoteriaALSModel): Double = {
-      math.sqrt(ratings.map(r => math.pow(r.rating - model.predict(r.user, r.item), 2)).mean())
+
+  case class SoteriaLinearRegressionModel(coefficients: Vector, intercept: Double) {
+    def predict(features: Vector): Double = {
+      var s = intercept
+      features.foreachActive((j, v) => s += coefficients(j) * v)
+      s
     }
   }
-  
-  case class SoteriaALSModel(
-    userFactors: Map[Int, Array[Double]], 
-    itemFactors: Map[Int, Array[Double]], 
-    rank: Int
-  ) {
-    def predict(user: Int, item: Int): Double = {
-      (userFactors.get(user), itemFactors.get(item)) match {
-        case (Some(userVec), Some(itemVec)) =>
-          userVec.zip(itemVec).map { case (u, i) => u * i }.sum
-        case _ => 0.0 // Default prediction for cold start
-      }
-    }
-  }
-  
+
+  // ------------------------------------------------------------ Naive Bayes
+
   /**
-   * Security and Privacy Utilities
+   * Multinomial naive Bayes with additive smoothing (as MLlib's default).
+   * Labels must be class indices 0, 1, ...; features must be non-negative.
+   * Untrusted executors see per-partition per-class counts and feature sums.
    */
-  object SecurityUtils {
-    
-    /**
-     * Per-partition Fisher-Yates shuffle (records never leave their partition).
-     */
-    def secureDataShuffle[T: ClassTag](data: RDD[T], seed: Long = System.currentTimeMillis()): RDD[T] = {
-      data.mapPartitionsWithIndex { (index, iterator) =>
-        val random = new Random(seed + index)
-        val shuffled = iterator.toArray
-        
-        for (i <- shuffled.length - 1 to 1 by -1) {
-          val j = random.nextInt(i + 1)
-          val temp = shuffled(i)
-          shuffled(i) = shuffled(j)
-          shuffled(j) = temp
-        }
-        
-        shuffled.iterator
+  class SoteriaNaiveBayes(session: SoteriaSession, smoothing: Double = 1.0) {
+
+    def train(dataset: EncryptedDataset[ClassificationData]): SoteriaNaiveBayesModel = {
+      // per class: (count, feature sums)
+      val stats = session.statistic(dataset.data.rdd)(mutable.HashMap.empty[Int, Array[Double]])(
+        (acc, p) => {
+          require(p.label >= 0 && p.label == math.floor(p.label), s"label ${p.label} is not a class index")
+          val x = p.features.toArray
+          require(x.forall(_ >= 0), "multinomial naive Bayes needs non-negative features")
+          val a = acc.getOrElseUpdate(p.label.toInt, new Array[Double](x.length + 1))
+          a(0) += 1
+          var j = 0
+          while (j < x.length) { a(j + 1) += x(j); j += 1 }
+          acc
+        },
+        (m1, m2) => {
+          m2.foreach { case (c, a) => m1.get(c) match {
+            case Some(b) => SoteriaML.addInPlace(b, a)
+            case None => m1(c) = a
+          } }
+          m1
+        })
+      require(stats.nonEmpty, "empty training set")
+
+      val numClasses = stats.keys.max + 1
+      val d = stats.values.head.length - 1
+      val n = stats.values.map(_(0)).sum
+      val piLogDenom = math.log(n + numClasses * smoothing)
+      val pi = Array.tabulate(numClasses)(c => math.log(stats.get(c).map(_(0)).getOrElse(0.0) + smoothing) - piLogDenom)
+      val theta = Array.ofDim[Double](numClasses, d)
+      for (c <- 0 until numClasses) {
+        val sums = stats.get(c).map(_.drop(1)).getOrElse(new Array[Double](d))
+        val thetaLogDenom = math.log(sums.sum + d * smoothing)
+        for (j <- 0 until d) theta(c)(j) = math.log(sums(j) + smoothing) - thetaLogDenom
       }
+      SoteriaNaiveBayesModel(
+        new DenseVector(pi),
+        new DenseMatrix(numClasses, d, Array.tabulate(numClasses * d)(i => theta(i % numClasses)(i / numClasses))))
     }
-    
-    /**
-     * Secure aggregation with integrity checking
-     */
-    def secureAggregate[T](data: RDD[T], aggregateFunc: (T, T) => T): T = {
-      // Basic secure aggregation - integrity checking to be added in future versions
-      data.reduce(aggregateFunc)
+  }
+
+  /** `pi` holds log class priors; `theta(c, j)` log feature probabilities. */
+  case class SoteriaNaiveBayesModel(pi: DenseVector, theta: DenseMatrix) {
+    def numClasses: Int = pi.size
+
+    def predict(features: Vector): Double = {
+      val scores = Array.tabulate(numClasses) { c =>
+        var s = pi(c)
+        features.foreachActive((j, v) => s += theta(c, j) * v)
+        s
+      }
+      scores.indices.maxBy(scores).toDouble
     }
-    
-    /* 
-     * FUTURE WORK: Advanced security features for SOTERIA v2+
-     * The following features are planned for future versions:
-     */
-    
-    /**
-     * Attack detection mechanisms (FUTURE WORK)
-     * This feature is not implemented in SOTERIA v1.0
-     */
-    /*
-    def detectAnomalousAccess(accessPattern: Seq[String]): Boolean = {
-      // TODO: Implement pattern analysis for detecting potential attacks
-      // This will include detection of:
-      // - Model inversion attacks
-      // - Membership inference attacks  
-      // - Model extraction attacks
-      val suspiciousPatterns = Set("repeated_model_query", "systematic_inference", "gradient_extraction")
-      accessPattern.exists(pattern => suspiciousPatterns.contains(pattern))
+  }
+
+  // -------------------------------------------------------------------- PCA
+
+  /**
+   * Principal components of the sample covariance. Untrusted executors see
+   * per-partition sums of x and x x^T; the eigendecomposition runs on the
+   * driver.
+   */
+  class SoteriaPCA(session: SoteriaSession, k: Int) {
+
+    def train(dataset: EncryptedDataset[PCAData]): SoteriaPCAModel = {
+      val data = dataset.data.rdd.map(_.features)
+      val d = numFeatures(session, data)
+      require(k <= d, s"k = $k exceeds the number of features $d")
+      val s = session.statistic(data)(new Array[Double](1 + d + d * d))(
+        (acc, v) => {
+          val x = v.toArray
+          acc(0) += 1
+          var i = 0
+          while (i < d) {
+            acc(1 + i) += x(i)
+            var j = 0
+            while (j < d) { acc(1 + d + i * d + j) += x(i) * x(j); j += 1 }
+            i += 1
+          }
+          acc
+        },
+        SoteriaML.addInPlace)
+
+      val n = s(0)
+      require(n > 1, "PCA needs at least two rows")
+      val mu = Array.tabulate(d)(i => s(1 + i) / n)
+      val cov = BDM.tabulate(d, d)((i, j) => (s(1 + d + i * d + j) - n * mu(i) * mu(j)) / (n - 1))
+      val eig = eigSym(cov)
+      val order = (0 until d).sortBy(i => -eig.eigenvalues(i)).take(k)
+      val total = breeze.linalg.sum(eig.eigenvalues)
+      val pc = new DenseMatrix(d, k, order.flatMap(i => eig.eigenvectors(::, i).toArray).toArray)
+      SoteriaPCAModel(pc, new DenseVector(order.map(i => eig.eigenvalues(i) / total).toArray))
     }
-    */
-    
-    /**
-     * Placeholder for attack detection (always returns false in v1.0)
-     */
-    def detectAnomalousAccess(accessPattern: Seq[String]): Boolean = {
-      // SOTERIA v1.0: Basic implementation - always returns false
-      // Advanced attack detection will be implemented in future versions
-      false
-    }
+  }
+
+  /** `pc` is d x k (components as columns); vectors are projected without centering, as in MLlib. */
+  case class SoteriaPCAModel(pc: DenseMatrix, explainedVariance: DenseVector) {
+    def transform(features: Vector): Vector = pc.transpose.multiply(features)
+  }
+
+  private[ml] def addInPlace(a: Array[Double], b: Array[Double]): Array[Double] = {
+    var i = 0
+    while (i < a.length) { a(i) += b(i); i += 1 }
+    a
   }
 }

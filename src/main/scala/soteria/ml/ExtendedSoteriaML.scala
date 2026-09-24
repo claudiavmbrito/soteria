@@ -1,141 +1,55 @@
 package soteria.ml
 
+import org.apache.spark.ml.clustering.{LDA, LDAModel}
+import org.apache.spark.ml.recommendation.{ALS, ALSModel}
+import org.apache.spark.ml.regression.{GBTRegressionModel, GBTRegressor}
 import soteria.core.SoteriaCore._
-import soteria.ml.SoteriaML.{ClassificationData, LDAData, PCAData, RegressionData}
-import org.apache.spark.sql.{Dataset, SparkSession}
-import org.apache.spark.sql.functions._
-import org.apache.spark.ml.feature.{VectorAssembler, PCA => ML_PCA}
-import org.apache.spark.ml.linalg.{Vector, Vectors, DenseVector}
-import org.apache.spark.ml.clustering.{KMeans, LDA, LDAModel}
-import org.apache.spark.ml.recommendation.ALS
-import org.apache.spark.ml.classification.{LogisticRegression, NaiveBayes, NaiveBayesModel}
-import org.apache.spark.ml.regression.{LinearRegression, LinearRegressionModel, GBTRegressor, GBTRegressionModel}
-import org.apache.spark.ml.evaluation.{MulticlassClassificationEvaluator, RegressionEvaluator}
-import org.apache.spark.ml.feature.PCAModel
-import org.apache.spark.sql.types._
-import org.apache.spark.rdd.RDD
-import scala.util.Random
+import soteria.ml.SoteriaML.{LDAData, RecommendationData, RegressionData}
 
 /**
- * Extended SOTERIA Machine Learning Implementation
- * Includes additional algorithms: LDA, Naive Bayes, PCA, GBT, Linear Regression
+ * Enclave-only trainers: thin wrappers around MLlib.
+ *
+ * MLlib creates its own stages, which use the application's default resource
+ * profile, and that profile is the enclave one. So in both SML-1 and SML-2
+ * these algorithms run entirely inside enclaves; nothing is placed on
+ * untrusted executors. Explicit SML-2 partitioning for them is future work.
  */
 object ExtendedSoteriaML {
-  
-  // Linear Regression
-  class SoteriaLinearRegression(session: SoteriaSession, maxIter: Int = 100, regParam: Double = 0.3) {
-    def train(dataset: EncryptedDataset[RegressionData]): LinearRegressionModel = {
-      // Sensitive zone (enclave, once enforced)
-      val result = session.executeWithPartitioning(
-        dataset,
-        "model_update",
-        (data: Dataset[RegressionData]) => {
-          
-          val lr = new LinearRegression()
-            .setMaxIter(maxIter)
-            .setRegParam(regParam)
-            .setFeaturesCol("features")
-            .setLabelCol("label")
-          
-          val model = lr.fit(data)
-          model
-        }
-      )
-      result
-    }
-  }
-  
-  // Gradient Boosted Trees
-  class SoteriaGBT(session: SoteriaSession, maxIter: Int = 100) {
-    def train(dataset: EncryptedDataset[RegressionData]): GBTRegressionModel = {
-      // Sensitive zone (enclave, once enforced)
-      val result = session.executeWithPartitioning(
-        dataset,
-        "model_update",
-        (data: Dataset[RegressionData]) => {
-          
-          val gbt = new GBTRegressor()
-            .setMaxIter(maxIter)
-            .setFeaturesCol("features")
-            .setLabelCol("label")
-          
-          val model = gbt.fit(data)
-          model
-        }
-      )
-      result
-    }
-  }
-  
-  // PCA
-  class SoteriaPCA(session: SoteriaSession, k: Int) {
-    def train(dataset: EncryptedDataset[PCAData]): PCAModel = {
-      // Sensitive zone (enclave, once enforced)
-      val result = session.executeWithPartitioning(
-        dataset,
-        "feature_extraction",
-        (data: Dataset[PCAData]) => {
-          
-          val assembler = new VectorAssembler()
-            .setInputCols(Array("features"))
-            .setOutputCol("features_vector")
-          
-          val dataFrame = assembler.transform(data)
 
-          val pca = new ML_PCA()
-            .setK(k)
-            .setInputCol("features_vector")
-            .setOutputCol("pca_features")
+  /** Collaborative filtering (explicit feedback). */
+  class SoteriaALS(session: SoteriaSession, rank: Int = 10, maxIterations: Int = 10, regParam: Double = 0.1, seed: Long = 42L) {
+    def train(dataset: EncryptedDataset[RecommendationData]): ALSModel =
+      new ALS()
+        .setRank(rank)
+        .setMaxIter(maxIterations)
+        .setRegParam(regParam)
+        .setSeed(seed)
+        .setUserCol("user")
+        .setItemCol("item")
+        .setRatingCol("rating")
+        .setColdStartStrategy("drop")
+        .fit(dataset.data)
+  }
 
-          val model = pca.fit(dataFrame)
-          model
-        }
-      )
-      result
-    }
+  /** Gradient boosted regression trees. */
+  class SoteriaGBT(session: SoteriaSession, maxIter: Int = 20, seed: Long = 42L) {
+    def train(dataset: EncryptedDataset[RegressionData]): GBTRegressionModel =
+      new GBTRegressor()
+        .setMaxIter(maxIter)
+        .setSeed(seed)
+        .setFeaturesCol("features")
+        .setLabelCol("label")
+        .fit(dataset.data)
   }
-  
-  // LDA
-  class SoteriaLDA(session: SoteriaSession, k: Int, maxIter: Int = 10) {
-    def train(dataset: EncryptedDataset[LDAData]): LDAModel = {
-      // Sensitive zone (enclave, once enforced)
-      val result = session.executeWithPartitioning(
-        dataset,
-        "model_update",
-        (data: Dataset[LDAData]) => {
-          
-          val lda = new LDA()
-            .setK(k)
-            .setMaxIter(maxIter)
-            .setFeaturesCol("features")
-          
-          val model = lda.fit(data)
-          model
-        }
-      )
-      result
-    }
-  }
-  
-  // Naive Bayes
-  class SoteriaNaiveBayes(session: SoteriaSession) {
-    def train(dataset: EncryptedDataset[ClassificationData]): NaiveBayesModel = {
-      // Sensitive zone (enclave, once enforced)
-      val result = session.executeWithPartitioning(
-        dataset,
-        "model_update",
-        (data: Dataset[ClassificationData]) => {
-          
-          val nb = new NaiveBayes()
-            .setFeaturesCol("features")
-            .setLabelCol("label")
-          
-          val model = nb.fit(data)
-          model
-        }
-      )
-      result
-    }
+
+  /** Topic modeling over term-count vectors. */
+  class SoteriaLDA(session: SoteriaSession, k: Int, maxIter: Int = 10, seed: Long = 42L) {
+    def train(dataset: EncryptedDataset[LDAData]): LDAModel =
+      new LDA()
+        .setK(k)
+        .setMaxIter(maxIter)
+        .setSeed(seed)
+        .setFeaturesCol("features")
+        .fit(dataset.data)
   }
 }
-
