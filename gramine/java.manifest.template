@@ -21,6 +21,7 @@ loader.env.HOME = "{{ work_dir }}"
 loader.env.SPARK_SCALA_VERSION = "2.12"
 # INSECURE (bring-up only): replaced by RA-TLS secret provisioning.
 loader.env.SOTERIA_MASTER_KEYS = { passthrough = true }
+loader.env.SOTERIA_MASTER_KEYS_FILE = { passthrough = true }
 # Avoids interface enumeration (SIOCGIFCONF), which Gramine does not emulate.
 loader.env.SPARK_LOCAL_IP = { passthrough = true }
 

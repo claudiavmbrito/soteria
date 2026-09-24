@@ -59,12 +59,13 @@ make start-worker-enclave
 make start-worker-native
 
 # 4. The SML-2 placement check, with the driver in an enclave.
-SOTERIA_MASTER_KEYS="soteria-master:$(head -c 16 /dev/urandom | base64)" make run-check
+make run-check
 ```
 
 Step 4 expects the same `PASS` line as `scripts/local-cluster/run.sh`. The
-enclave Worker needs the same `SOTERIA_MASTER_KEYS` in its environment as the
-driver (its executors inherit it), so start it with the variable set as well.
+first of `start-worker-enclave` / `run-check` creates `work/master.keys`; the
+driver and the enclave executors read the master key from it, and the
+untrusted Worker never gets it. No key needs to be passed between terminals.
 
 Once SGX is enabled in the BIOS and `scripts/check_sgx.sh` passes, repeat the
 steps with `SGX=1` (and `EDMM=1` on SGX2). With `SGX=1` the enclave
@@ -75,8 +76,8 @@ Worker advertises the `enclave` resource when `/dev/sgx_enclave` exists
 ## Known open points
 
 - **INSECURE bring-up settings.** `loader.insecure__use_cmdline_argv` lets the
-  host choose the JVM arguments, and `SOTERIA_MASTER_KEYS` is passed in from
-  the host. Both are replaced by fixed arguments and RA-TLS secret provisioning
+  host choose the JVM arguments, and the master key comes from a host file
+  (`work/master.keys`, or `SOTERIA_MASTER_KEYS` if set). Both are replaced by fixed arguments and RA-TLS secret provisioning
   (DCAP) with the key server, after the bring-up works.
 - **Dynamic loader.** On Rocky, `/lib64` (host libraries) is mounted next to
   Gramine's patched glibc in `/lib`. If step 1 fails while loading libraries,
@@ -87,7 +88,10 @@ Worker advertises the `enclave` resource when `/dev/sgx_enclave` exists
   paths the JVM opens (`Error loading java.security file` otherwise).
 - **Harmless messages in Gramine JVMs.** Hadoop probes `setsid` by forking at
   startup; inside Gramine that fork can fail (`process creation failed`) and is
-  ignored. Network-interface enumeration is avoided with `SPARK_LOCAL_IP`.
+  ignored. At shutdown Spark tries `rm` in a child process the same way and
+  falls back to deleting from Java ("Falling back to Java IO way"). Netty
+  still warns that it cannot list network interfaces (`SIOCGIFCONF`); Spark
+  itself uses `SPARK_LOCAL_IP`.
 - **Memory.** The JVM reserves heap, metaspace, code cache and thread stacks
   up front; if the enclave runs out of memory, raise `ENCLAVE_SIZE` or lower
   `JVM_HEAP`.

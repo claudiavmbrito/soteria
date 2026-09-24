@@ -104,8 +104,11 @@ object SoteriaCore extends Logging {
     if (config.encryptionEnabled) ParquetEncryption.configure(spark.sparkContext.hadoopConfiguration)
     
     private def resolveMasterKey(): SecretKey = SoteriaKeyStore.get(config.keyId).getOrElse {
-      require(!config.requireProvisionedKey,
-        s"master key '${config.keyId}' was not provisioned (set ${SoteriaKeyStore.EnvKeys} or ${SoteriaKeyStore.EnvKeysFile})")
+      require(!config.requireProvisionedKey, {
+        val emptyEnv = sys.env.get(SoteriaKeyStore.EnvKeys).exists(_.trim.isEmpty)
+        s"master key '${config.keyId}' was not provisioned (set ${SoteriaKeyStore.EnvKeys} or ${SoteriaKeyStore.EnvKeysFile})" +
+          (if (emptyEnv) s"; ${SoteriaKeyStore.EnvKeys} is set but empty" else "")
+      })
       logWarning(s"No master key '${config.keyId}' provisioned; using an ephemeral key. " +
         "Data encrypted in this session cannot be read by later sessions.")
       val key = EncryptionUtils.generateKey(config.keySize)
