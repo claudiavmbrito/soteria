@@ -152,6 +152,9 @@ object SoteriaCore extends Logging {
       .appName(appName)
       .config("spark.sql.adaptive.enabled", "true")
       .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+      // Change local file permissions in-process: no chmod/chown child processes,
+      // which cannot be started inside Gramine enclaves.
+      .config("spark.hadoop.fs.file.impl", classOf[soteria.io.NioLocalFileSystem].getName)
       .getOrCreate()
       
     new SoteriaSession(spark, config)

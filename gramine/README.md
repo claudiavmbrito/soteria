@@ -89,7 +89,9 @@ Worker advertises the `enclave` resource when `/dev/sgx_enclave` exists
 - **Harmless messages in Gramine JVMs.** Hadoop probes `setsid` by forking at
   startup; inside Gramine that fork can fail (`process creation failed`) and is
   ignored. At shutdown Spark tries `rm` in a child process the same way and
-  falls back to deleting from Java ("Falling back to Java IO way"). Netty
+  falls back to deleting from Java ("Falling back to Java IO way"). Hadoop's
+  `chmod`/`chown` child processes, which would be fatal when writing output,
+  are replaced by `soteria.io.NioLocalFileSystem` (set by every SOTERIA session). Netty
   still warns that it cannot list network interfaces (`SIOCGIFCONF`); Spark
   itself uses `SPARK_LOCAL_IP`.
 - **Memory.** The JVM reserves heap, metaspace, code cache and thread stacks

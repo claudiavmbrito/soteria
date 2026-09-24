@@ -71,8 +71,10 @@ check-env:
 
 # SOTERIA jars built by sbt (sbt package Test/package), copied so that only
 # they, not the whole target/ tree, are measured into the enclave.
+# Always rebuilds (incremental, fast when nothing changed) so a git pull is
+# never run with stale jars.
 dist:
-	@ls $(ROOT)/target/scala-2.12/soteria_2.12-*.jar >/dev/null 2>&1 || (cd $(ROOT) && sbt -batch package Test/package)
+	cd $(ROOT) && sbt -batch package Test/package
 	mkdir -p $(SOTERIA_DIR)
 	cp $(ROOT)/target/scala-2.12/soteria_2.12-*.jar $(SOTERIA_DIR)/
 
