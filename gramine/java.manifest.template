@@ -29,6 +29,15 @@ fs.mounts = [
   { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
   { path = "/usr", uri = "file:/usr" },
   { path = "/etc", uri = "file:/etc" },
+{#- On RHEL/Rocky the JDK's conf/ and the crypto-policies java.config are
+    symlinks into /etc and /usr/share; mount their real locations so the JVM
+    never has to follow a host symlink inside Gramine. #}
+{%- if java_conf and java_conf != java_home + "/conf" %}
+  { path = "{{ java_home }}/conf", uri = "file:{{ java_conf }}" },
+{%- endif %}
+{%- if crypto_java %}
+  { path = "/etc/crypto-policies/back-ends/java.config", uri = "file:{{ crypto_java }}" },
+{%- endif %}
   { path = "{{ spark_home }}", uri = "file:{{ spark_home }}" },
   { path = "{{ here }}", uri = "file:{{ here }}" },
 {%- for dir in [soteria_dir, work_dir] if not (dir + "/").startswith(here + "/") %}
@@ -53,6 +62,12 @@ sgx.trusted_files = [
   "file:{{ arch_libdir }}/",
   "file:/usr{{ arch_libdir }}/",
   "file:{{ java_home }}/",
+{%- if java_conf and java_conf != java_home + "/conf" %}
+  "file:{{ java_conf }}/",
+{%- endif %}
+{%- if crypto_java %}
+  "file:{{ crypto_java }}",
+{%- endif %}
   "file:/usr/bin/bash",
   "file:{{ spark_home }}/jars/",
   "file:{{ soteria_dir }}/",

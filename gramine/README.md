@@ -70,6 +70,10 @@ under `gramine-direct` the Makefile sets `SOTERIA_FAKE_ENCLAVE=1` instead.
 - **Dynamic loader.** On Rocky, `/lib64` (host libraries) is mounted next to
   Gramine's patched glibc in `/lib`. If step 1 fails while loading libraries,
   run with `DEBUG=1` and send the log.
+- **Symlinked JDK config (RHEL/Rocky).** The JDK's `conf/` directory and the
+  crypto-policies `java.config` are symlinks into `/etc` and `/usr/share`. The
+  Makefile resolves them, and the manifest mounts the real locations at the
+  paths the JVM opens (`Error loading java.security file` otherwise).
 - **Memory.** The JVM reserves heap, metaspace, code cache and thread stacks
   up front; if the enclave runs out of memory, raise `ENCLAVE_SIZE` or lower
   `JVM_HEAP`.

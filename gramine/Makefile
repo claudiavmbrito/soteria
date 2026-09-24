@@ -28,6 +28,8 @@ WORKER_MEM   ?= 4g
 # Symlinks are resolved: trusted files must match the paths the JVM opens.
 JAVA_REAL    := $(realpath $(JAVA_HOME))
 SPARK_REAL   := $(realpath $(SPARK_HOME))
+JAVA_CONF    := $(realpath $(JAVA_REAL)/conf)
+CRYPTO_JAVA  := $(realpath /etc/crypto-policies/back-ends/java.config)
 bool          = $(if $(filter 1 true,$(1)),true,false)
 
 ifeq ($(SGX),1)
@@ -41,7 +43,10 @@ LOG_LEVEL    := $(if $(filter 1,$(DEBUG)),debug,error)
 
 # The same module openings as build.sbt; serial GC and no container probing
 # keep the JVM's memory layout predictable inside the enclave.
-JVM_OPTS := -Xms256m -Xmx$(JVM_HEAP) -XX:+UseSerialGC -XX:-UseContainerSupport \
+# Heap flags are kept apart: Spark rejects -Xmx in spark.executor.extraJavaOptions
+# (executor heaps come from spark.executor.memory).
+JVM_HEAP_OPTS := -Xms256m -Xmx$(JVM_HEAP)
+JVM_BASE_OPTS := -XX:+UseSerialGC -XX:-UseContainerSupport -XX:-UsePerfData \
   -XX:ReservedCodeCacheSize=64m -XX:CompressedClassSpaceSize=64m -XX:MaxMetaspaceSize=256m \
   -XX:+PreserveFramePointer \
   --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED \
@@ -51,6 +56,7 @@ JVM_OPTS := -Xms256m -Xmx$(JVM_HEAP) -XX:+UseSerialGC -XX:-UseContainerSupport \
   --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED \
   --add-opens=java.base/sun.nio.cs=ALL-UNNAMED --add-opens=java.base/sun.security.action=ALL-UNNAMED \
   --add-opens=java.base/sun.util.calendar=ALL-UNNAMED -Djdk.reflect.useDirectMethodHandle=false
+JVM_OPTS := $(JVM_HEAP_OPTS) $(JVM_BASE_OPTS)
 
 SPARK_CP     := $(SPARK_REAL)/jars/*:$(SOTERIA_DIR)/*
 
@@ -79,6 +85,8 @@ java.manifest: java.manifest.template dist hello/HelloWorld.class check-env
 	  -Dlog_level=$(LOG_LEVEL) \
 	  -Darch_libdir=$(ARCH_LIBDIR) \
 	  -Djava_home=$(JAVA_REAL) \
+	  -Djava_conf=$(JAVA_CONF) \
+	  -Dcrypto_java=$(CRYPTO_JAVA) \
 	  -Dspark_home=$(SPARK_REAL) \
 	  -Dsoteria_dir=$(SOTERIA_DIR) \
 	  -Dwork_dir=$(WORK_DIR) \
@@ -134,7 +142,8 @@ run-check: all
 	  -Dspark.dynamicAllocation.enabled=true -Dspark.dynamicAllocation.shuffleTracking.enabled=true \
 	  -Dspark.dynamicAllocation.minExecutors=2 -Dspark.dynamicAllocation.maxExecutors=2 \
 	  -Dspark.soteria.untrusted.executor.memory=1g \
-	  -Dspark.executor.extraJavaOptions='$(JVM_OPTS)' \
+	  -Dspark.executor.extraJavaOptions='$(JVM_BASE_OPTS)' \
+	  -Dspark.executor.extraClassPath='$(SOTERIA_DIR)/*' \
 	  soteria.it.SchedulingCheck $(WORK_DIR)/data
 
 clean:
