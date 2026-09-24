@@ -52,6 +52,6 @@ if [[ ! -f $key ]]; then
 fi
 
 echo
-gramine-manifest --version 2>/dev/null | head -1 || true
+rpm -q gramine 2>/dev/null || dpkg-query -W -f='gramine ${Version}\n' gramine 2>/dev/null || true
 command -v gramine-direct gramine-sgx
 command -v is-sgx-available >/dev/null && { is-sgx-available || true; }

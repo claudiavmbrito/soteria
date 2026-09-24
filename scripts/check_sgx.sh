@@ -111,7 +111,7 @@ fi
 section "Gramine"
 if have gramine-sgx; then
   OK "gramine-sgx found: $(command -v gramine-sgx)"
-  have gramine-manifest && INFO "$(gramine-manifest --version 2>/dev/null | head -1)"
+  v=$(rpm -q gramine 2>/dev/null || dpkg-query -W -f='gramine ${Version}' gramine 2>/dev/null) && INFO "package: $v"
 else
   FAIL "gramine-sgx not found"
 fi
