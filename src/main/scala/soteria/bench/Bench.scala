@@ -206,10 +206,12 @@ object Bench {
       }
     }
 
-    private def plain(algo: String): DataFrame = spark.read.parquet(path(workload(algo)))
+    private def read(algo: String): DataFrame = readParts(spark, path(workload(algo)))
+
+    private def plain(algo: String): DataFrame = read(algo)
 
     private def encrypted[T: Encoder](algo: String): EncryptedDataset[T] =
-      soteria.get.loadEncryptedDataset[T](path(workload(algo)))
+      EncryptedDataset(read(algo).as[T], soteria.get.masterKey)
 
     private def timed[M](train: => M): (M, Double) = {
       val start = System.nanoTime()
@@ -300,14 +302,29 @@ object Bench {
     def inputPartitions(algo: String): Int = dataFrame(algo).rdd.getNumPartitions
 
     /** The algorithm's dataset as a DataFrame, decrypted in the SOTERIA modes. */
-    private def dataFrame(algo: String): DataFrame =
-      if (soteria.isEmpty) plain(algo) else soteria.get.spark.read.parquet(path(workload(algo)))
+    private def dataFrame(algo: String): DataFrame = read(algo)
 
     private def accuracy(predictions: DataFrame): Double =
       new MulticlassClassificationEvaluator().setMetricName("accuracy").evaluate(predictions)
 
     private def rmse(predictions: DataFrame, label: String): Double =
       new RegressionEvaluator().setLabelCol(label).setMetricName("rmse").evaluate(predictions)
+  }
+
+  /**
+   * Reads a Parquet directory one part file at a time, in part-number order.
+   * A plain `read.parquet(dir)` orders files by size and, on ties, by the
+   * directory listing (random file names; a Gramine process that wrote the
+   * directory may also list it in its own order), so the rows of each
+   * partition could differ between runs and modes. Here every mode, plain or
+   * encrypted, gets the same rows in the same partitions.
+   */
+  def readParts(spark: SparkSession, dir: String): DataFrame = {
+    val d = new Path(dir)
+    val fs = d.getFileSystem(spark.sparkContext.hadoopConfiguration)
+    val parts = fs.listStatus(d).map(_.getPath).filter(_.getName.startsWith("part-")).sortBy(_.getName)
+    require(parts.nonEmpty, s"no data files in $dir")
+    parts.map(p => spark.read.parquet(p.toString)).reduce(_ union _)
   }
 
   // Evaluation of the SOTERIA models: plain functions, so closures capture only the model.

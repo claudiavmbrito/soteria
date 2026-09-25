@@ -40,6 +40,19 @@ class BenchSuite extends SparkTestBase {
     }
   }
 
+  test("part files are read in part-number order, whatever their sizes") {
+    val spark = session.spark
+    import spark.implicits._
+    val dir = Files.createTempDirectory("soteria-bench-order").resolve("d").toString
+    // part-00000 is the smallest file and part-00001 the largest: ordering by
+    // size would put ids 10..1009 in the first partition.
+    val ranges = Seq(0L until 10L, 10L until 1010L, 1010L until 1110L)
+    spark.sparkContext.parallelize(ranges, ranges.size).flatMap(identity).toDF("id").write.parquet(dir)
+    val firstIds = Bench.readParts(spark, dir).as[Long].rdd
+      .mapPartitionsWithIndex((i, it) => Iterator(i -> it.min)).collect().sortBy(_._1).map(_._2)
+    assert(firstIds.toSeq == ranges.map(_.head))
+  }
+
   test("all algorithms run in every mode with comparable quality") {
     val dir = Files.createTempDirectory("soteria-bench").toString
     val sml1 = new SoteriaSession(session.spark, SoteriaConfig(mode = Some(SML1)))
@@ -61,6 +74,10 @@ class BenchSuite extends SparkTestBase {
     // Input splits are fixed, so sampling algorithms train the same model in SML-1 and SML-2.
     for (algo <- Seq("kmeans", "gbt", "lda"))
       assert(runs("sml1")(algo) == runs("sml2")(algo), s"$algo: sml1 ${runs("sml1")(algo)} vs sml2 ${runs("sml2")(algo)}")
+    // Partitions hold the same rows in plain and encrypted data (different file
+    // names and sizes), so the MLlib-based trainers match vanilla exactly.
+    for (mode <- Seq("sml1", "sml2"); algo <- Seq("als", "gbt", "lda"))
+      assert(runs(mode)(algo) == runs("vanilla")(algo), s"$mode/$algo: ${runs(mode)(algo)} vs vanilla ${runs("vanilla")(algo)}")
     for (mode <- Seq("sml1", "sml2"); algo <- Seq("lr", "bayes", "linear", "pca")) {
       val (v, q) = (runs("vanilla")(algo), runs(mode)(algo))
       assert(math.abs(v - q) <= 0.05 * math.max(1.0, math.abs(v)), s"$mode/$algo: $q vs vanilla $v")
