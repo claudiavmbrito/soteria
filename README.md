@@ -11,15 +11,15 @@ The main goal of SOTERIA, besides providing alternatives for state-of-the-art so
 
 ### Status and roadmap
 
-The Scala library in `src/` stores datasets as encrypted Parquet (AES-GCM) and places computation with Spark stage-level scheduling: stages that touch raw data run on executors holding the `enclave` resource, and in SML-2 only per-partition statistics are combined on untrusted executors. This placement is verified on a real standalone cluster (`scripts/local-cluster/run.sh`). **The enclave itself is not in place yet**: until phase 3, the `enclave` resource is advertised by a plain worker, not by one running inside Gramine-SGX. The v2.0 rebuild proceeds in phases:
+The Scala library in `src/` stores datasets as encrypted Parquet (AES-GCM) and places computation with Spark stage-level scheduling: stages that touch raw data run on executors holding the `enclave` resource, and in SML-2 only per-partition statistics are combined on untrusted executors. This placement is verified on a real standalone cluster (`scripts/local-cluster/run.sh`). `scripts/local-cluster/run.sh` uses a plain worker to advertise the `enclave` resource; `gramine/` runs the driver and the enclave executors in Gramine (`gramine-direct` for now; `gramine-sgx` once the SGX machine is ready). The v2.0 rebuild proceeds in phases:
 
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Builds on Spark 3.5 / Java 17, honest APIs, unit tests, CI | done |
 | 1 | Encrypted storage: Parquet modular encryption (AES-GCM) with a SOTERIA KMS client | done |
 | 2 | Real computation partitioning (SML-1 / SML-2) via Spark stage-level scheduling, plus a leakage auditor | done |
-| 3 | Gramine (>= 1.8) manifests, SGX2 + DCAP attestation, RA-TLS key provisioning | planned |
-| 4 | Reproduce the paper's evaluation (ALS, Bayes, GBT, K-Means, LDA, Linear, LR, PCA) vs. vanilla Spark | planned |
+| 3 | Gramine (>= 1.8) manifests, SGX2 + DCAP attestation, RA-TLS key provisioning | in progress: the SML-2 cluster check passes under `gramine-direct`; SGX, attestation and key provisioning next |
+| 4 | Reproduce the paper's evaluation (ALS, Bayes, GBT, K-Means, LDA, Linear, LR, PCA) vs. vanilla Spark | harness ready ([`bench/`](bench/README.md)); SGX measurements pending |
 
 ### Build and test
 
@@ -118,6 +118,7 @@ Supported: Rocky/RHEL 9.4+ and Ubuntu 22.04/24.04. The scripts use `sudo` for pa
    scripts/check_sgx.sh
    ```
 5. **Run Spark under Gramine**: see [`gramine/README.md`](gramine/README.md).
+6. **Benchmarks**: see [`bench/README.md`](bench/README.md).
 
 ### Usage
 

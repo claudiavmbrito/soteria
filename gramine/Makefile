@@ -62,7 +62,7 @@ JVM_OPTS := $(JVM_HEAP_OPTS) $(JVM_BASE_OPTS)
 
 SPARK_CP     := $(SPARK_REAL)/jars/*:$(SOTERIA_DIR)/*
 
-.PHONY: all check-env dist hello spark-version start-master start-worker-enclave start-worker-native run-check clean
+.PHONY: all check-env dist hello spark-version start-master start-worker-enclave start-worker-native run-check bench bench-vanilla bench-plot clean
 
 all: java.manifest $(SGX_FILES)
 
@@ -158,25 +158,90 @@ start-worker-native: check-env
 	  --host $(MASTER_HOST) --cores $(WORKER_CORES) --memory $(WORKER_MEM) \
 	  --webui-port 0 --work-dir $(WORK_DIR)/native-worker $(MASTER)
 
+# Driver settings for the cluster started above: executors of the default
+# profile need the enclave resource; SML-2 adds untrusted executors on demand.
+CLUSTER_CONF := -Dspark.master=$(MASTER) -Dspark.driver.host=$(MASTER_HOST) -Dspark.ui.enabled=false \
+  -Dspark.executor.cores=1 -Dspark.executor.memory=1g \
+  -Dspark.executor.resource.enclave.amount=1 -Dspark.task.resource.enclave.amount=1 \
+  -Dspark.dynamicAllocation.enabled=true -Dspark.dynamicAllocation.shuffleTracking.enabled=true \
+  -Dspark.dynamicAllocation.minExecutors=$(WORKER_CORES) -Dspark.dynamicAllocation.maxExecutors=$(WORKER_CORES) \
+  -Dspark.soteria.untrusted.executor.memory=1g \
+  -Dspark.executor.extraJavaOptions='$(JVM_BASE_OPTS)' \
+  -Dspark.executor.extraClassPath='$(SOTERIA_DIR)/*'
+
+# Lines of a JVM log that matter; the rest (child-process fallbacks inside
+# Gramine: "rm", error=13) is known noise.
+summary = grep -E "^(executors|tasks|LR training|PASS|FAIL|DONE|ERROR:)|Exception in thread|Caused by| ERROR " $(1) \
+  | grep -vE '"rm"|error=13' | sed -E 's/^[0-9\/]+ [0-9:]+ //' | awk '!seen[$$0]++' | head -20
+
 # Step 4: the SML-2 placement check, with the driver in an enclave.
 # The full log goes to work/run-check.log; a summary is printed at the end.
 run-check: all $(KEYS_FILE)
 	rm -rf $(WORK_DIR)/data
 	set -o pipefail; SPARK_LOCAL_IP=$(MASTER_HOST) SOTERIA_MASTER_KEYS_FILE=$(KEYS_FILE) $(GRAMINE) java $(JVM_OPTS) -cp '$(SPARK_CP)' \
-	  -Dspark.master=$(MASTER) -Dspark.driver.host=$(MASTER_HOST) -Dspark.ui.enabled=false \
-	  -Dspark.executor.cores=1 -Dspark.executor.memory=1g \
-	  -Dspark.executor.resource.enclave.amount=1 -Dspark.task.resource.enclave.amount=1 \
-	  -Dspark.dynamicAllocation.enabled=true -Dspark.dynamicAllocation.shuffleTracking.enabled=true \
-	  -Dspark.dynamicAllocation.minExecutors=2 -Dspark.dynamicAllocation.maxExecutors=2 \
-	  -Dspark.soteria.untrusted.executor.memory=1g \
-	  -Dspark.executor.extraJavaOptions='$(JVM_BASE_OPTS)' \
-	  -Dspark.executor.extraClassPath='$(SOTERIA_DIR)/*' \
-	  soteria.it.SchedulingCheck $(WORK_DIR)/data 2>&1 | tee $(WORK_DIR)/run-check.log; \
+	  $(CLUSTER_CONF) soteria.it.SchedulingCheck $(WORK_DIR)/data 2>&1 | tee $(WORK_DIR)/run-check.log; \
 	rc=$$?; \
 	echo "==== run-check summary (full log: $(WORK_DIR)/run-check.log) ===="; \
-	grep -E "^(executors|tasks|LR training|PASS|FAIL)|Exception in thread|Caused by| ERROR " $(WORK_DIR)/run-check.log \
-	  | grep -v '"rm"' | sed -E 's/^[0-9\/]+ [0-9:]+ //' | awk '!seen[$$0]++' | head -20; \
+	$(call summary,$(WORK_DIR)/run-check.log); \
 	exit $$rc
+
+# Phase 4: benchmarks (see ../bench/README.md). Results are appended to
+# work/bench/results.csv; datasets are generated once per scale and kept.
+ALGO        ?= all
+MODE        ?= sml2
+SCALE       ?= 0.1
+REPS        ?= 3
+WARMUP      ?= 1
+PARTITIONS  ?= 8
+BENCH_DIR   := $(WORK_DIR)/bench
+BENCH_ARGS   = --algo $(ALGO) --scale $(SCALE) --reps $(REPS) --warmup $(WARMUP) --partitions $(PARTITIONS) --data $(BENCH_DIR)/data
+VANILLA_PORT ?= 7078
+
+# Appends the RESULT rows of log $(1) to the CSV (header on first use), then prints the summary.
+bench-collect = rc=$$?; mkdir -p $(BENCH_DIR); \
+	[ -s $(BENCH_DIR)/results.csv ] || grep -m1 '^HEADER,' $(1) | cut -d, -f2- > $(BENCH_DIR)/results.csv; \
+	grep '^RESULT,' $(1) | cut -d, -f2- >> $(BENCH_DIR)/results.csv; \
+	echo "==== bench summary (full log: $(1)) ===="; \
+	grep '^RESULT,' $(1) | cut -d, -f4-5,9-13 \
+	  | awk -F, '{ printf "%-8s %-7s rep %-2s warmup=%-5s %9ss  %s=%s\n", $$1, $$2, $$3, $$4, $$5, $$6, $$7 }'; \
+	$(call summary,$(1)); \
+	echo "results: $(BENCH_DIR)/results.csv"; \
+	exit $$rc
+
+# SML-1 / SML-2 on the cluster of step 3, driver in an enclave.
+bench: all $(KEYS_FILE)
+	@case "$(MODE)" in sml1|sml2) ;; *) echo "MODE must be sml1 or sml2 (vanilla: make bench-vanilla)"; exit 1;; esac
+	mkdir -p $(BENCH_DIR)
+	set -o pipefail; SPARK_LOCAL_IP=$(MASTER_HOST) SOTERIA_MASTER_KEYS_FILE=$(KEYS_FILE) SOTERIA_RUNNER=$(GRAMINE) \
+	  $(GRAMINE) java $(JVM_OPTS) -cp '$(SPARK_CP)' $(CLUSTER_CONF) \
+	  soteria.bench.Bench --mode $(MODE) $(BENCH_ARGS) 2>&1 | tee $(BENCH_DIR)/$(MODE).log; \
+	$(call bench-collect,$(BENCH_DIR)/$(MODE).log)
+
+# Vanilla Spark baseline: its own native Master and Worker (port
+# $(VANILLA_PORT), so the enclave cluster can keep running), the same number
+# of 1-core executors, a native driver, plain Parquet and MLlib.
+bench-vanilla: dist check-env
+	mkdir -p $(BENCH_DIR)
+	set -o pipefail; \
+	SPARK_LOCAL_IP=$(MASTER_HOST) $(JAVA_REAL)/bin/java $(JVM_OPTS) -cp '$(SPARK_CP)' org.apache.spark.deploy.master.Master \
+	  --host $(MASTER_HOST) --port $(VANILLA_PORT) --webui-port 0 > $(BENCH_DIR)/vanilla-master.log 2>&1 & m=$$!; \
+	sleep 5; \
+	env -u SOTERIA_MASTER_KEYS -u SOTERIA_MASTER_KEYS_FILE JAVA_HOME=$(JAVA_REAL) SPARK_HOME=$(SPARK_REAL) SPARK_SCALA_VERSION=2.12 SPARK_LOCAL_IP=$(MASTER_HOST) \
+	  $(JAVA_REAL)/bin/java $(JVM_OPTS) -cp '$(SPARK_CP)' org.apache.spark.deploy.worker.Worker \
+	  --host $(MASTER_HOST) --cores $(WORKER_CORES) --memory $(WORKER_MEM) --webui-port 0 \
+	  --work-dir $(BENCH_DIR)/vanilla-worker spark://$(MASTER_HOST):$(VANILLA_PORT) > $(BENCH_DIR)/vanilla-worker.log 2>&1 & w=$$!; \
+	sleep 8; \
+	SPARK_LOCAL_IP=$(MASTER_HOST) SOTERIA_RUNNER=native $(JAVA_REAL)/bin/java $(JVM_OPTS) -cp '$(SPARK_CP)' \
+	  -Dspark.master=spark://$(MASTER_HOST):$(VANILLA_PORT) -Dspark.driver.host=$(MASTER_HOST) -Dspark.ui.enabled=false \
+	  -Dspark.executor.cores=1 -Dspark.executor.memory=1g -Dspark.cores.max=$(WORKER_CORES) \
+	  -Dspark.executor.extraJavaOptions='$(JVM_BASE_OPTS)' -Dspark.executor.extraClassPath='$(SOTERIA_DIR)/*' \
+	  soteria.bench.Bench --mode vanilla $(BENCH_ARGS) 2>&1 | tee $(BENCH_DIR)/vanilla.log; \
+	rc=$$?; kill $$w $$m 2>/dev/null; (exit $$rc); \
+	$(call bench-collect,$(BENCH_DIR)/vanilla.log)
+
+# Plots from results.csv (needs python3-matplotlib).
+bench-plot:
+	python3 $(ROOT)/bench/plot.py $(BENCH_DIR)/results.csv --out $(BENCH_DIR)/plots
 
 clean:
 	$(RM) java.manifest java.manifest.sgx java.sig hello/*.class

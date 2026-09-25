@@ -60,6 +60,12 @@ make start-worker-native
 
 # 4. The SML-2 placement check, with the driver in an enclave.
 make run-check
+
+# 5. Benchmarks: vanilla Spark vs SML-1 vs SML-2 (see ../bench/README.md).
+make bench MODE=sml2
+make bench MODE=sml1
+make bench-vanilla
+make bench-plot
 ```
 
 Step 4 expects the same `PASS` line as `scripts/local-cluster/run.sh`. It
