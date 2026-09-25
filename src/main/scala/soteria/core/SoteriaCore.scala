@@ -155,6 +155,10 @@ object SoteriaCore extends Logging {
       // Change local file permissions in-process: no chmod/chown child processes,
       // which cannot be started inside Gramine enclaves.
       .config("spark.hadoop.fs.file.impl", classOf[soteria.io.NioLocalFileSystem].getName)
+      // Always fetch shuffle blocks from the executor that wrote them. With the
+      // host-local shortcut, an executor opens another executor's shuffle files
+      // directly; enclave executors keep theirs in a private in-enclave /tmp.
+      .config("spark.shuffle.readHostLocalDisk", "false")
       .getOrCreate()
       
     new SoteriaSession(spark, config)

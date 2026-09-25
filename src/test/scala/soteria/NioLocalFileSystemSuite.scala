@@ -18,6 +18,10 @@ class NioLocalFileSystemSuite extends SparkTestBase {
     assert(FileSystem.getLocal(conf).getClass == classOf[NioLocalFileSystem])
   }
 
+  test("sessions fetch shuffle blocks from their owner, not from local disk") {
+    assert(session.spark.sparkContext.getConf.get("spark.shuffle.readHostLocalDisk") == "false")
+  }
+
   test("setPermission and mkdirs apply POSIX permissions without child processes") {
     val fs = new NioLocalFileSystem
     fs.initialize(java.net.URI.create("file:///"), new Configuration())

@@ -99,6 +99,11 @@ Worker advertises the `enclave` resource when `/dev/sgx_enclave` exists
   are replaced by `soteria.io.NioLocalFileSystem` (set by every SOTERIA session). Netty
   still warns that it cannot list network interfaces (`SIOCGIFCONF`); Spark
   itself uses `SPARK_LOCAL_IP`.
+- **Private `/tmp` in enclaves.** Each enclave JVM has its own in-enclave
+  `/tmp` (the manifest's tmpfs mount), which holds Spark's shuffle files. Every
+  SOTERIA session therefore sets `spark.shuffle.readHostLocalDisk=false`, so
+  shuffle blocks are always fetched from the executor that wrote them
+  (`NoSuchFileException … shuffle_*.index` otherwise).
 - **Memory.** The JVM reserves heap, metaspace, code cache and thread stacks
   up front; if the enclave runs out of memory, raise `ENCLAVE_SIZE` or lower
   `JVM_HEAP`.
