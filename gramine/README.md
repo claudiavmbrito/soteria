@@ -62,7 +62,10 @@ make start-worker-native
 make run-check
 ```
 
-Step 4 expects the same `PASS` line as `scripts/local-cluster/run.sh`. The
+Step 4 expects the same `PASS` line as `scripts/local-cluster/run.sh`. It
+saves its full output to `work/run-check.log` and ends with a short summary;
+when asking for help, send that summary and the first errors of the executors:
+`grep -h -m5 -E "ERROR|Exception" work/*-worker/app-*/*/stderr`. The
 first of `start-worker-enclave` / `run-check` creates `work/master.keys`; the
 driver and the enclave executors read the master key from it, and the
 untrusted Worker never gets it. No key needs to be passed between terminals.
@@ -86,6 +89,8 @@ Worker advertises the `enclave` resource when `/dev/sgx_enclave` exists
   crypto-policies `java.config` are symlinks into `/etc` and `/usr/share`. The
   Makefile resolves them, and the manifest mounts the real locations at the
   paths the JVM opens (`Error loading java.security file` otherwise).
+- **Quieter logs.** `log4j2.properties` (passed to the driver and executors)
+  silences the expected warnings listed below, so real errors stand out.
 - **Harmless messages in Gramine JVMs.** Hadoop probes `setsid` by forking at
   startup; inside Gramine that fork can fail (`process creation failed`) and is
   ignored. At shutdown Spark tries `rm` in a child process the same way and

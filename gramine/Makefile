@@ -3,6 +3,7 @@
 #   make SGX=1 <target>    gramine-sgx (signed enclave)
 # See README.md for the bring-up order.
 
+SHELL        := /bin/bash
 ROOT         := $(abspath ..)
 JAVA_HOME    ?= /usr/lib/jvm/java-17-openjdk
 SPARK_HOME   ?= /opt/spark
@@ -46,7 +47,8 @@ LOG_LEVEL    := $(if $(filter 1,$(DEBUG)),debug,error)
 # Heap flags are kept apart: Spark rejects -Xmx in spark.executor.extraJavaOptions
 # (executor heaps come from spark.executor.memory).
 JVM_HEAP_OPTS := -Xms256m -Xmx$(JVM_HEAP)
-JVM_BASE_OPTS := -XX:+UseSerialGC -XX:-UseContainerSupport -XX:-UsePerfData \
+JVM_BASE_OPTS := -Dlog4j.configurationFile=$(CURDIR)/log4j2.properties \
+  -XX:+UseSerialGC -XX:-UseContainerSupport -XX:-UsePerfData \
   -XX:ReservedCodeCacheSize=64m -XX:CompressedClassSpaceSize=64m -XX:MaxMetaspaceSize=256m \
   -XX:+PreserveFramePointer \
   --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED \
@@ -157,8 +159,9 @@ start-worker-native: check-env
 	  --webui-port 0 --work-dir $(WORK_DIR)/native-worker $(MASTER)
 
 # Step 4: the SML-2 placement check, with the driver in an enclave.
+# The full log goes to work/run-check.log; a summary is printed at the end.
 run-check: all $(KEYS_FILE)
-	SPARK_LOCAL_IP=$(MASTER_HOST) SOTERIA_MASTER_KEYS_FILE=$(KEYS_FILE) $(GRAMINE) java $(JVM_OPTS) -cp '$(SPARK_CP)' \
+	set -o pipefail; SPARK_LOCAL_IP=$(MASTER_HOST) SOTERIA_MASTER_KEYS_FILE=$(KEYS_FILE) $(GRAMINE) java $(JVM_OPTS) -cp '$(SPARK_CP)' \
 	  -Dspark.master=$(MASTER) -Dspark.driver.host=$(MASTER_HOST) -Dspark.ui.enabled=false \
 	  -Dspark.executor.cores=1 -Dspark.executor.memory=1g \
 	  -Dspark.executor.resource.enclave.amount=1 -Dspark.task.resource.enclave.amount=1 \
@@ -167,7 +170,11 @@ run-check: all $(KEYS_FILE)
 	  -Dspark.soteria.untrusted.executor.memory=1g \
 	  -Dspark.executor.extraJavaOptions='$(JVM_BASE_OPTS)' \
 	  -Dspark.executor.extraClassPath='$(SOTERIA_DIR)/*' \
-	  soteria.it.SchedulingCheck $(WORK_DIR)/data
+	  soteria.it.SchedulingCheck $(WORK_DIR)/data 2>&1 | tee $(WORK_DIR)/run-check.log; \
+	rc=$$?; \
+	echo "==== run-check summary (full log: $(WORK_DIR)/run-check.log) ===="; \
+	grep -E "^(executors|tasks|LR training|PASS|FAIL)|Exception in thread|Caused by| ERROR " $(WORK_DIR)/run-check.log | head -20; \
+	exit $$rc
 
 clean:
 	$(RM) java.manifest java.manifest.sgx java.sig hello/*.class
