@@ -6,6 +6,7 @@ import scala.collection.JavaConverters._
 
 import org.apache.spark.ml.linalg.Vectors
 import org.apache.spark.resource.ResourceProfile
+import org.apache.spark.sql.SaveMode
 import org.apache.spark.scheduler.{SparkListener, SparkListenerExecutorAdded, SparkListenerStageSubmitted, SparkListenerTaskEnd}
 import soteria.core.SoteriaCore
 import soteria.core.SoteriaCore.SoteriaConfig
@@ -56,8 +57,9 @@ object SchedulingCheck {
     }
 
     // Encrypted storage: only processes holding the master key can read these.
-    session.saveEncrypted(cls.toDS().repartition(8), s"$dataDir/cls.enc")
-    session.saveEncrypted(reg.toDS().repartition(4), s"$dataDir/reg.enc")
+    // Overwrite, so that a rerun after a failed run starts clean.
+    session.saveEncrypted(cls.toDS().repartition(8), s"$dataDir/cls.enc", SaveMode.Overwrite)
+    session.saveEncrypted(reg.toDS().repartition(4), s"$dataDir/reg.enc", SaveMode.Overwrite)
 
     val lr = new SoteriaLogisticRegression(session, maxIterations = 20)
       .train(session.loadEncryptedDataset[ClassificationData](s"$dataDir/cls.enc"))

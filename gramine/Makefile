@@ -161,6 +161,7 @@ start-worker-native: check-env
 # Step 4: the SML-2 placement check, with the driver in an enclave.
 # The full log goes to work/run-check.log; a summary is printed at the end.
 run-check: all $(KEYS_FILE)
+	rm -rf $(WORK_DIR)/data
 	set -o pipefail; SPARK_LOCAL_IP=$(MASTER_HOST) SOTERIA_MASTER_KEYS_FILE=$(KEYS_FILE) $(GRAMINE) java $(JVM_OPTS) -cp '$(SPARK_CP)' \
 	  -Dspark.master=$(MASTER) -Dspark.driver.host=$(MASTER_HOST) -Dspark.ui.enabled=false \
 	  -Dspark.executor.cores=1 -Dspark.executor.memory=1g \
@@ -173,7 +174,8 @@ run-check: all $(KEYS_FILE)
 	  soteria.it.SchedulingCheck $(WORK_DIR)/data 2>&1 | tee $(WORK_DIR)/run-check.log; \
 	rc=$$?; \
 	echo "==== run-check summary (full log: $(WORK_DIR)/run-check.log) ===="; \
-	grep -E "^(executors|tasks|LR training|PASS|FAIL)|Exception in thread|Caused by| ERROR " $(WORK_DIR)/run-check.log | head -20; \
+	grep -E "^(executors|tasks|LR training|PASS|FAIL)|Exception in thread|Caused by| ERROR " $(WORK_DIR)/run-check.log \
+	  | grep -v '"rm"' | sed -E 's/^[0-9\/]+ [0-9:]+ //' | awk '!seen[$$0]++' | head -20; \
 	exit $$rc
 
 clean:
