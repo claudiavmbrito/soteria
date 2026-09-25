@@ -27,6 +27,13 @@ INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 def load(path):
     with open(path, newline="") as f:
         rows = [r for r in csv.DictReader(f) if r["warmup"].strip().lower() != "true"]
+    # Rows without input_partitions were written before every mode read the
+    # same input splits; their SML-1 and SML-2 models are not comparable.
+    old = [r for r in rows if not (r.get("input_partitions") or "").strip()]
+    if old:
+        print(f"skipping {len(old)} rows written before input splits were fixed; "
+              "rerun those modes (see bench/README.md)", file=sys.stderr)
+        rows = [r for r in rows if r not in old]
     if not rows:
         sys.exit(f"{path}: no measured (non-warm-up) rows")
     return rows

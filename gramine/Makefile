@@ -212,9 +212,9 @@ bench-collect = rc=$$?; mkdir -p $(BENCH_DIR); \
 bench: all $(KEYS_FILE)
 	@case "$(MODE)" in sml1|sml2) ;; *) echo "MODE must be sml1 or sml2 (vanilla: make bench-vanilla)"; exit 1;; esac
 	mkdir -p $(BENCH_DIR)
-	set -o pipefail; SPARK_LOCAL_IP=$(MASTER_HOST) SOTERIA_MASTER_KEYS_FILE=$(KEYS_FILE) SOTERIA_RUNNER=$(GRAMINE) \
+	set -o pipefail; SPARK_LOCAL_IP=$(MASTER_HOST) SOTERIA_MASTER_KEYS_FILE=$(KEYS_FILE) \
 	  $(GRAMINE) java $(JVM_OPTS) -cp '$(SPARK_CP)' $(CLUSTER_CONF) \
-	  soteria.bench.Bench --mode $(MODE) $(BENCH_ARGS) 2>&1 | tee $(BENCH_DIR)/$(MODE).log; \
+	  soteria.bench.Bench --mode $(MODE) --runner $(GRAMINE) $(BENCH_ARGS) 2>&1 | tee $(BENCH_DIR)/$(MODE).log; \
 	$(call bench-collect,$(BENCH_DIR)/$(MODE).log)
 
 # Vanilla Spark baseline: its own native Master and Worker (port
@@ -231,11 +231,11 @@ bench-vanilla: dist check-env
 	  --host $(MASTER_HOST) --cores $(WORKER_CORES) --memory $(WORKER_MEM) --webui-port 0 \
 	  --work-dir $(BENCH_DIR)/vanilla-worker spark://$(MASTER_HOST):$(VANILLA_PORT) > $(BENCH_DIR)/vanilla-worker.log 2>&1 & w=$$!; \
 	sleep 8; \
-	SPARK_LOCAL_IP=$(MASTER_HOST) SOTERIA_RUNNER=native $(JAVA_REAL)/bin/java $(JVM_OPTS) -cp '$(SPARK_CP)' \
+	SPARK_LOCAL_IP=$(MASTER_HOST) $(JAVA_REAL)/bin/java $(JVM_OPTS) -cp '$(SPARK_CP)' \
 	  -Dspark.master=spark://$(MASTER_HOST):$(VANILLA_PORT) -Dspark.driver.host=$(MASTER_HOST) -Dspark.ui.enabled=false \
 	  -Dspark.executor.cores=1 -Dspark.executor.memory=1g -Dspark.cores.max=$(WORKER_CORES) \
 	  -Dspark.executor.extraJavaOptions='$(JVM_BASE_OPTS)' -Dspark.executor.extraClassPath='$(SOTERIA_DIR)/*' \
-	  soteria.bench.Bench --mode vanilla $(BENCH_ARGS) 2>&1 | tee $(BENCH_DIR)/vanilla.log; \
+	  soteria.bench.Bench --mode vanilla --runner native $(BENCH_ARGS) 2>&1 | tee $(BENCH_DIR)/vanilla.log; \
 	rc=$$?; kill $$w $$m 2>/dev/null; (exit $$rc); \
 	$(call bench-collect,$(BENCH_DIR)/vanilla.log)
 

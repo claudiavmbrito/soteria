@@ -31,7 +31,7 @@ import soteria.partition.{ComputationPartitioner, SoteriaMode}
  * prefixed with `HEADER,`), so a driver running inside an enclave needs no
  * host file for its results.
  *
- * Usage: Bench --mode vanilla|sml1|sml2 --data DIR [--algo all|lr,kmeans,...]
+ * Usage: Bench --mode vanilla|sml1|sml2 --data DIR [--algo all|lr,kmeans,...] [--runner NAME]
  *              [--scale 1.0] [--partitions 8] [--reps 3] [--warmup 1] [--seed 42]
  */
 object Bench {
@@ -59,7 +59,8 @@ object Bench {
     reps: Int = 3,
     warmup: Int = 1,
     seed: Long = 42L,
-    ephemeralKey: Boolean = false
+    ephemeralKey: Boolean = false,
+    runner: String = "native"
   ) {
     def vanilla: Boolean = mode == "vanilla"
   }
@@ -85,6 +86,7 @@ object Bench {
       case "--warmup" :: v :: t => loop(t, o.copy(warmup = v.toInt))
       case "--seed" :: v :: t => loop(t, o.copy(seed = v.toLong))
       case "--ephemeral-key" :: t => loop(t, o.copy(ephemeralKey = true))
+      case "--runner" :: v :: t => loop(t, o.copy(runner = v))
       case other :: _ => usage(s"unknown or incomplete option '$other'")
     }
     val o = loop(args.toList, Options())
@@ -96,7 +98,7 @@ object Bench {
 
   private def usage(msg: String): Nothing = throw new IllegalArgumentException(
     s"$msg\nusage: Bench --mode vanilla|sml1|sml2 --data DIR [--algo all|${Algorithms.mkString(",")}] " +
-      "[--scale 1.0] [--partitions 8] [--reps 3] [--warmup 1] [--seed 42] [--ephemeral-key]")
+      "[--scale 1.0] [--partitions 8] [--reps 3] [--warmup 1] [--seed 42] [--ephemeral-key] [--runner native|gramine-direct|gramine-sgx]")
 
   def csvRow(o: Options, runner: String, m: Measurement, rep: Int, warmup: Boolean, placement: (Long, Long)): String =
     Seq(Instant.now().toString, runner, o.mode, m.algorithm, o.scale, m.rows, o.partitions, rep, warmup,
@@ -112,7 +114,6 @@ object Bench {
     val placement = new PlacementCounter
     spark.sparkContext.addSparkListener(placement)
     val runner = new Runner(spark, soteria, o)
-    val runnerName = sys.env.getOrElse("SOTERIA_RUNNER", "native")
 
     println(s"HEADER,$Header")
     val failed = o.algorithms.filterNot { algo =>
@@ -123,7 +124,7 @@ object Bench {
           val m = runner.run(algo)
           Thread.sleep(1000) // let the listener bus deliver the last task events
           val after = placement.snapshot
-          val row = csvRow(o, runnerName, m, rep, rep < o.warmup, (after._1 - before._1, after._2 - before._2))
+          val row = csvRow(o, o.runner, m, rep, rep < o.warmup, (after._1 - before._1, after._2 - before._2))
           println(s"RESULT,$row")
         }
         true

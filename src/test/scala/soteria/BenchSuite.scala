@@ -21,6 +21,8 @@ class BenchSuite extends SparkTestBase {
     val o = Bench.parseArgs(Seq("--mode", "SML-2", "--data", "/d", "--algo", "lr,pca", "--scale", "0.5", "--reps", "2"))
     assert(o.mode == "sml2" && o.algorithms == Seq("lr", "pca") && o.scale == 0.5 && o.reps == 2 && o.warmup == 1)
     assert(Bench.parseArgs(Seq("--mode", "vanilla", "--data", "/d")).algorithms == Bench.Algorithms)
+    assert(Bench.parseArgs(Seq("--mode", "sml1", "--data", "/d", "--runner", "gramine-sgx")).runner == "gramine-sgx")
+    assert(o.runner == "native")
     intercept[IllegalArgumentException](Bench.parseArgs(Seq("--mode", "sml3", "--data", "/d")))
     intercept[IllegalArgumentException](Bench.parseArgs(Seq("--mode", "vanilla", "--data", "/d", "--algo", "svm")))
     intercept[IllegalArgumentException](Bench.parseArgs(Seq("--data", "/d")))
