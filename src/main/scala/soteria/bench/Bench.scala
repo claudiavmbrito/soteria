@@ -39,7 +39,7 @@ object Bench {
   val Algorithms: Seq[String] = Seq("als", "bayes", "gbt", "kmeans", "lda", "linear", "lr", "pca")
 
   val Header: String =
-    "timestamp,runner,mode,algo,scale,rows,partitions,rep,warmup,train_s,metric,quality,enclave_tasks,untrusted_tasks"
+    "timestamp,runner,mode,algo,scale,rows,partitions,rep,warmup,train_s,metric,quality,enclave_tasks,untrusted_tasks,input_partitions"
 
   // Hyperparameters shared by the vanilla and SOTERIA runs.
   val Iterations = 20
@@ -64,7 +64,8 @@ object Bench {
     def vanilla: Boolean = mode == "vanilla"
   }
 
-  case class Measurement(algorithm: String, rows: Long, trainSeconds: Double, metric: String, quality: Double)
+  case class Measurement(algorithm: String, rows: Long, trainSeconds: Double, metric: String, quality: Double,
+    inputPartitions: Int)
 
   def parseArgs(args: Seq[String]): Options = {
     def loop(rest: List[String], o: Options): Options = rest match {
@@ -99,7 +100,7 @@ object Bench {
 
   def csvRow(o: Options, runner: String, m: Measurement, rep: Int, warmup: Boolean, placement: (Long, Long)): String =
     Seq(Instant.now().toString, runner, o.mode, m.algorithm, o.scale, m.rows, o.partitions, rep, warmup,
-      f"${m.trainSeconds}%.3f", m.metric, f"${m.quality}%.6f", placement._1, placement._2).mkString(",")
+      f"${m.trainSeconds}%.3f", m.metric, f"${m.quality}%.6f", placement._1, placement._2, m.inputPartitions).mkString(",")
 
   def main(args: Array[String]): Unit = {
     val o = parseArgs(args.toSeq)
@@ -162,6 +163,13 @@ object Bench {
     import spark.implicits._
     import Workloads._
 
+    // Split every dataset into the same input partitions in every mode. By
+    // default Spark sizes file splits from the executor cores registered at
+    // read time, which differ between vanilla, SML-1 and SML-2 (untrusted
+    // executors); algorithms that sample per partition (K-Means seeding, GBT
+    // binning, LDA minibatches) would then train different models.
+    spark.conf.set("spark.sql.files.minPartitionNum", o.partitions.toLong)
+
     private def workload(algo: String): Workload = algo match {
       case "lr" => Classification
       case "bayes" => Counts
@@ -173,7 +181,7 @@ object Bench {
     }
 
     private def path(w: Workload): String =
-      s"${o.dataDir}/scale-${o.scale}-seed-${o.seed}/${w.name}.${if (o.vanilla) "plain" else "enc"}"
+      s"${o.dataDir}/scale-${o.scale}-seed-${o.seed}-parts-${o.partitions}/${w.name}.${if (o.vanilla) "plain" else "enc"}"
 
     /** Writes the algorithm's dataset unless a complete copy already exists. */
     def prepare(algo: String): Unit = {
@@ -284,8 +292,11 @@ object Bench {
           (m.logPerplexity(dataFrame(algo)), t)
         }
       }
-      Measurement(algo, n, seconds, metric, quality)
+      Measurement(algo, n, seconds, metric, quality, inputPartitions(algo))
     }
+
+    /** Number of partitions the algorithm's dataset is read into. */
+    def inputPartitions(algo: String): Int = dataFrame(algo).rdd.getNumPartitions
 
     /** The algorithm's dataset as a DataFrame, decrypted in the SOTERIA modes. */
     private def dataFrame(algo: String): DataFrame =

@@ -10,7 +10,8 @@ vanilla Spark and on SOTERIA in SML-1 and SML-2.
 | sml1 | encrypted Parquet | SOTERIA | driver and executors in Gramine; statistics combined in enclaves too |
 | sml2 | encrypted Parquet | SOTERIA | as SML-1, but statistic combines on untrusted native executors |
 
-Both sides use the same generated data and hyperparameters (`soteria.bench.Bench`).
+Both sides use the same generated data, input splits (`PARTITIONS`) and
+hyperparameters (`soteria.bench.Bench`).
 Every dataset is deterministic (seed and row id), is generated once per scale
 under `gramine/work/bench/data/`, and is reused by later runs.
 
@@ -50,15 +51,22 @@ Start with the default `SCALE=0.1`, then increase it. Under SGX, raise
 
 `gramine/work/bench/results.csv` gets one row per repetition:
 
-`timestamp, runner, mode, algo, scale, rows, partitions, rep, warmup, train_s, metric, quality, enclave_tasks, untrusted_tasks`
+`timestamp, runner, mode, algo, scale, rows, partitions, rep, warmup, train_s, metric, quality, enclave_tasks, untrusted_tasks, input_partitions`
 
 - `train_s` is the time to train the model, including reading and decrypting the data.
 - `quality`: training accuracy (lr, bayes), RMSE (linear, gbt, als), K-Means
   cost, explained variance (pca) or log perplexity (lda). It checks that
   SOTERIA trains the same models as vanilla Spark.
+- `input_partitions` is the number of splits the data was read into; it is
+  the same in every mode (`spark.sql.files.minPartitionNum` is fixed), so
+  sampling algorithms (K-Means seeding, GBT binning, LDA) train identical
+  models in SML-1 and SML-2. Vanilla reads the plain files, whose sizes
+  differ from the encrypted ones; Spark orders files by size when it fills
+  the splits, so its GBT and LDA results can differ slightly from SOTERIA's.
 - `enclave_tasks` / `untrusted_tasks` count tasks by where they ran. In SML-2
   only the statistic combines of lr, linear, kmeans, bayes and pca run on
   untrusted executors; als, gbt and lda stay in enclaves (MLlib wrappers).
+  Vanilla has no enclave, so all its tasks count as `untrusted_tasks`.
 
 `make bench-plot` (needs `python3-matplotlib`) writes, per runner and scale,
 the training time per algorithm (median with min–max), the overhead relative

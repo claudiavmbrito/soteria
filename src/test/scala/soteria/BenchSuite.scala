@@ -26,6 +26,18 @@ class BenchSuite extends SparkTestBase {
     intercept[IllegalArgumentException](Bench.parseArgs(Seq("--data", "/d")))
   }
 
+  test("input partitions depend on the data, not on the executor cores") {
+    // local[2]: Spark would pack these 4 small files into about 2 splits.
+    val dir = Files.createTempDirectory("soteria-bench-splits").toString
+    for ((mode, s) <- Seq("vanilla" -> None, "sml2" -> Some(session))) {
+      val runner = new Runner(session.spark, s, Options(mode = mode, dataDir = dir, scale = 0.002, partitions = 4))
+      for (algo <- Bench.Algorithms) {
+        runner.prepare(algo)
+        assert(runner.inputPartitions(algo) == 4, s"$mode/$algo")
+      }
+    }
+  }
+
   test("all algorithms run in every mode with comparable quality") {
     val dir = Files.createTempDirectory("soteria-bench").toString
     val sml1 = new SoteriaSession(session.spark, SoteriaConfig(mode = Some(SML1)))
@@ -44,6 +56,9 @@ class BenchSuite extends SparkTestBase {
     }.toMap
 
     // The same data (vanilla reads it in plain, SOTERIA encrypted) gives comparable models.
+    // Input splits are fixed, so sampling algorithms train the same model in SML-1 and SML-2.
+    for (algo <- Seq("kmeans", "gbt", "lda"))
+      assert(runs("sml1")(algo) == runs("sml2")(algo), s"$algo: sml1 ${runs("sml1")(algo)} vs sml2 ${runs("sml2")(algo)}")
     for (mode <- Seq("sml1", "sml2"); algo <- Seq("lr", "bayes", "linear", "pca")) {
       val (v, q) = (runs("vanilla")(algo), runs(mode)(algo))
       assert(math.abs(v - q) <= 0.05 * math.max(1.0, math.abs(v)), s"$mode/$algo: $q vs vanilla $v")
