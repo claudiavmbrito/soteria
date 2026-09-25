@@ -104,8 +104,11 @@ object SoteriaCore extends Logging {
     if (config.encryptionEnabled) ParquetEncryption.configure(spark.sparkContext.hadoopConfiguration)
     
     private def resolveMasterKey(): SecretKey = SoteriaKeyStore.get(config.keyId).getOrElse {
-      require(!config.requireProvisionedKey,
-        s"master key '${config.keyId}' was not provisioned (set ${SoteriaKeyStore.EnvKeys} or ${SoteriaKeyStore.EnvKeysFile})")
+      require(!config.requireProvisionedKey, {
+        val emptyEnv = sys.env.get(SoteriaKeyStore.EnvKeys).exists(_.trim.isEmpty)
+        s"master key '${config.keyId}' was not provisioned (set ${SoteriaKeyStore.EnvKeys} or ${SoteriaKeyStore.EnvKeysFile})" +
+          (if (emptyEnv) s"; ${SoteriaKeyStore.EnvKeys} is set but empty" else "")
+      })
       logWarning(s"No master key '${config.keyId}' provisioned; using an ephemeral key. " +
         "Data encrypted in this session cannot be read by later sessions.")
       val key = EncryptionUtils.generateKey(config.keySize)
@@ -149,6 +152,13 @@ object SoteriaCore extends Logging {
       .appName(appName)
       .config("spark.sql.adaptive.enabled", "true")
       .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+      // Change local file permissions in-process: no chmod/chown child processes,
+      // which cannot be started inside Gramine enclaves.
+      .config("spark.hadoop.fs.file.impl", classOf[soteria.io.NioLocalFileSystem].getName)
+      // Always fetch shuffle blocks from the executor that wrote them. With the
+      // host-local shortcut, an executor opens another executor's shuffle files
+      // directly; enclave executors keep theirs in a private in-enclave /tmp.
+      .config("spark.shuffle.readHostLocalDisk", "false")
       .getOrCreate()
       
     new SoteriaSession(spark, config)
